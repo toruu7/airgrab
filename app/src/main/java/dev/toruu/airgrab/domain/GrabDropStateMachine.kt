@@ -27,10 +27,14 @@ sealed interface SenderState {
 
 sealed interface ReceiverState {
     object Listening : ReceiverState
-    data class Armed(val grabReady: ControlMessage.GrabReady) : ReceiverState
+    data class Armed(
+        val grabReady: ControlMessage.GrabReady,
+        val senderEndpointId: String
+    ) : ReceiverState
     data class Receiving(
         val sessionId: String,
         val grabReady: ControlMessage.GrabReady,
+        val senderEndpointId: String,
         val progress: Float
     ) : ReceiverState
     data class Delivered(
@@ -104,7 +108,8 @@ class GrabDropStateMachine {
     }
 
     fun onAcceptDropReceived(
-        acceptDrop: ControlMessage.AcceptDrop
+        acceptDrop: ControlMessage.AcceptDrop,
+        actualEndpointId: String
     ): Pair<TransferPayload, ControlMessage.SessionClaimed>? {
         val current = _senderState.value
         // First-come, first-served lock!
@@ -113,14 +118,14 @@ class GrabDropStateMachine {
             val payload = current.payload
             _senderState.value = SenderState.Transferring(
                 sessionId = lockedSessionId,
-                receiverEndpointId = acceptDrop.receiverEndpointId,
+                receiverEndpointId = actualEndpointId,
                 payload = payload,
                 progress = 0f
             )
 
             val sessionClaimed = ControlMessage.SessionClaimed(
                 sessionId = lockedSessionId,
-                claimedByEndpointId = acceptDrop.receiverEndpointId
+                claimedByEndpointId = actualEndpointId
             )
             return payload to sessionClaimed
         }
@@ -153,26 +158,27 @@ class GrabDropStateMachine {
 
     // --- Receiver Actions ---
 
-    fun onGrabReadyReceived(grabReady: ControlMessage.GrabReady) {
+    fun onGrabReadyReceived(grabReady: ControlMessage.GrabReady, senderEndpointId: String) {
         if (System.currentTimeMillis() <= grabReady.expiresAtEpochMs) {
-            _receiverState.value = ReceiverState.Armed(grabReady)
+            _receiverState.value = ReceiverState.Armed(grabReady, senderEndpointId)
         }
     }
 
-    fun onDropTriggered(receiverEndpointId: String): ControlMessage.AcceptDrop? {
+    fun onDropTriggered(): Pair<String, ControlMessage.AcceptDrop>? {
         val current = _receiverState.value
         if (current is ReceiverState.Armed) {
             if (System.currentTimeMillis() <= current.grabReady.expiresAtEpochMs) {
                 val acceptDrop = ControlMessage.AcceptDrop(
                     sessionId = current.grabReady.sessionId,
-                    receiverEndpointId = receiverEndpointId
+                    receiverEndpointId = current.senderEndpointId
                 )
                 _receiverState.value = ReceiverState.Receiving(
                     sessionId = current.grabReady.sessionId,
                     grabReady = current.grabReady,
+                    senderEndpointId = current.senderEndpointId,
                     progress = 0f
                 )
-                return acceptDrop
+                return current.senderEndpointId to acceptDrop
             } else {
                 _receiverState.value = ReceiverState.Listening
             }

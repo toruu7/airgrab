@@ -176,22 +176,13 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
     private fun onDropGesture() {
         if (_appMode.value != AppMode.RECEIVER) return
         try {
-            val myEndpointId = nearbyTransport.connectedPeers.value.keys.firstOrNull() ?: "local-receiver"
-            val acceptDrop = stateMachine.onDropTriggered(myEndpointId)
-            if (acceptDrop != null) {
-                Log.d(TAG, "Drop gesture triggered, sending AcceptDrop: $acceptDrop")
+            val dropResult = stateMachine.onDropTriggered()
+            if (dropResult != null) {
+                val (targetEndpoint, acceptDrop) = dropResult
+                Log.d(TAG, "Drop gesture triggered, sending AcceptDrop to $targetEndpoint: $acceptDrop")
                 viewModelScope.launch {
                     try {
-                        val currentArmed = receiverState.value
-                        val targetEndpoint = if (currentArmed is ReceiverState.Armed) {
-                            currentArmed.grabReady.senderEndpointId
-                        } else {
-                            nearbyTransport.connectedPeers.value.keys.firstOrNull()
-                        }
-
-                        targetEndpoint?.let {
-                            nearbyTransport.sendControl(it, acceptDrop)
-                        }
+                        nearbyTransport.sendControl(targetEndpoint, acceptDrop)
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to send AcceptDrop: ${e.message}", e)
                     }
@@ -225,17 +216,17 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
                 when (message) {
                     is ControlMessage.GrabReady -> {
                         wakeScreen()
-                        stateMachine.onGrabReadyReceived(message)
+                        stateMachine.onGrabReadyReceived(message, endpointId)
                         gestureDetector.setPowerMode(active = true) // Boost to 30 fps for drop
                     }
                     is ControlMessage.AcceptDrop -> {
-                        val lockResult = stateMachine.onAcceptDropReceived(message)
+                        val lockResult = stateMachine.onAcceptDropReceived(message, endpointId)
                         if (lockResult != null) {
                             val (payload, sessionClaimed) = lockResult
                             // Broadcast claim to all other peers
                             nearbyTransport.broadcastControl(sessionClaimed)
-                            // Transmit payload
-                            transmitPayload(message.receiverEndpointId, payload)
+                            // Transmit payload directly to the endpoint that requested the drop!
+                            transmitPayload(endpointId, payload)
                         }
                     }
                     is ControlMessage.SessionClaimed -> {

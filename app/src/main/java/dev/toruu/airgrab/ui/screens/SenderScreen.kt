@@ -387,7 +387,8 @@ fun SenderScreen(
 
             // Transfer Progress Bar & Action Bottom Area
             if (senderState is SenderState.Transferring) {
-                val progress = transferProgress ?: 0f
+                val stateProgress = (senderState as? SenderState.Transferring)?.progress ?: 0f
+                val progress = (transferProgress ?: stateProgress).coerceIn(0f, 1f)
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
