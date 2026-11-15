@@ -1,5 +1,6 @@
 package dev.toruu.airgrab.ui.screens
 
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -129,6 +130,9 @@ fun HomeScreen(
                 var isServiceEnabled by androidx.compose.runtime.remember {
                     androidx.compose.runtime.mutableStateOf(dev.toruu.airgrab.service.AirGrabDiscoveryService.isServiceRunning)
                 }
+                var canDrawOverlay by androidx.compose.runtime.remember {
+                    androidx.compose.runtime.mutableStateOf(android.provider.Settings.canDrawOverlays(context))
+                }
 
                 Card(
                     shape = RoundedCornerShape(20.dp),
@@ -137,47 +141,77 @@ fun HomeScreen(
                     ),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .padding(16.dp)
-                            .fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Default.Sensors,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.Sensors,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "Ambient Screen-Off Wake",
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.titleSmall
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = "Ambient Screen-Off Wake",
-                                    fontWeight = FontWeight.Bold,
-                                    style = MaterialTheme.typography.titleSmall
+                                    text = "Listen via low-power BLE and wake screen on grab.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "Listen via low-power BLE and wake screen on grab.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+
+                            Switch(
+                                checked = isServiceEnabled,
+                                onCheckedChange = { enable ->
+                                    isServiceEnabled = enable
+                                    if (enable) {
+                                        dev.toruu.airgrab.service.AirGrabDiscoveryService.start(context)
+                                    } else {
+                                        dev.toruu.airgrab.service.AirGrabDiscoveryService.stop(context)
+                                    }
+                                }
                             )
                         }
 
-                        Switch(
-                            checked = isServiceEnabled,
-                            onCheckedChange = { enable ->
-                                isServiceEnabled = enable
-                                if (enable) {
-                                    dev.toruu.airgrab.service.AirGrabDiscoveryService.start(context)
-                                } else {
-                                    dev.toruu.airgrab.service.AirGrabDiscoveryService.stop(context)
-                                }
+                        // Seamless Auto-Wake Overlay Permission Prompt
+                        if (!canDrawOverlay) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            Text(
+                                text = "⚠️ 'Appear on top' permission is required to turn on the screen automatically from the background.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            Button(
+                                onClick = {
+                                    val intent = Intent(
+                                        android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                        Uri.parse("package:${context.packageName}")
+                                    )
+                                    context.startActivity(intent)
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(imageVector = Icons.Default.Launch, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Enable 'Appear on Top'")
                             }
-                        )
+                        }
                     }
                 }
             }

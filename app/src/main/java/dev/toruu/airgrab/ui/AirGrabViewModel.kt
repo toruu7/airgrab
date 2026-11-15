@@ -62,11 +62,12 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
         observeGestures()
         observeIncomingControl()
         observeIncomingFiles()
+        observeOutgoingComplete()
         observeProgress()
         startTtlMonitor()
     }
 
-    fun bindCamera(lifecycleOwner: LifecycleOwner, previewView: PreviewView?) {
+    fun bindCamera(lifecycleOwner: LifecycleOwner, previewView: PreviewView? = null) {
         gestureDetector.start(lifecycleOwner, previewView)
     }
 
@@ -273,13 +274,14 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
                 val mimeType = grabReady?.mimeType ?: "application/octet-stream"
                 val payloadType = grabReady?.payloadType ?: "FILE"
 
-                val javaFile = incoming.payload.asFile()?.asJavaFile()
-                if (javaFile != null) {
-                    val inputStream = FileInputStream(javaFile)
-                    val result = when (payloadType) {
-                        "MEDIA" -> payloadSaver.saveMedia(fileName, mimeType, inputStream)
-                        "FOLDER_ZIP" -> payloadSaver.saveAndExtractZip(fileName, inputStream)
-                        else -> payloadSaver.saveDocumentOrBinary(fileName, inputStream)
+                val inputStream = NearbyConnectionsManager.openPayloadInputStream(context, incoming.payload)
+                if (inputStream != null) {
+                    val result = inputStream.use { stream ->
+                        when (payloadType) {
+                            "MEDIA" -> payloadSaver.saveMedia(fileName, mimeType, stream)
+                            "FOLDER_ZIP" -> payloadSaver.saveAndExtractZip(fileName, stream)
+                            else -> payloadSaver.saveDocumentOrBinary(fileName, stream)
+                        }
                     }
                     stateMachine.onReceiverDelivered(result)
                     hysteresis.startCooldown()
@@ -290,6 +292,17 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
                         incoming.endpointId,
                         ControlMessage.TransferComplete(sessionId = sessionId, success = true)
                     )
+                }
+            }
+        }
+    }
+
+    private fun observeOutgoingComplete() {
+        viewModelScope.launch {
+            nearbyTransport.outgoingComplete.collect { (payloadId, endpointId) ->
+                if (_appMode.value == AppMode.SENDER) {
+                    stateMachine.onSenderTransferComplete()
+                    hysteresis.startCooldown()
                 }
             }
         }

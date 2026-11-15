@@ -184,13 +184,14 @@ class AirGrabDiscoveryService : Service() {
 
         Log.d(TAG, "Grab signal detected from ${grabReady.senderName} (${grabReady.fileName}). Waking screen...")
 
-        // Temporary wake lock to ensure CPU and display turn on immediately
+        // Robust wake lock to turn on screen across modern Samsung/Android devices
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        @Suppress("DEPRECATION")
         val wakeLock = powerManager.newWakeLock(
-            PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+            PowerManager.FULL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.ON_AFTER_RELEASE,
             "airgrab:wake_alert"
         )
-        wakeLock.acquire(4000L)
+        wakeLock.acquire(5000L)
 
         val wakeIntent = Intent(this, ReceiverWakeActivity::class.java).apply {
             putExtra(ReceiverWakeActivity.EXTRA_SESSION_ID, grabReady.sessionId)
@@ -203,6 +204,16 @@ class AirGrabDiscoveryService : Service() {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                     Intent.FLAG_ACTIVITY_CLEAR_TOP or
                     Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+
+        // Direct Activity Launch (permitted when SYSTEM_ALERT_WINDOW is granted or keyguard locked)
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        if (android.provider.Settings.canDrawOverlays(this) || (keyguardManager != null && keyguardManager.isKeyguardLocked)) {
+            try {
+                startActivity(wakeIntent)
+            } catch (e: Exception) {
+                Log.w(TAG, "Direct startActivity deferred to FullScreenIntent: ${e.message}")
+            }
         }
 
         val fullScreenPendingIntent = PendingIntent.getActivity(

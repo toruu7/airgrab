@@ -111,10 +111,6 @@ class ReceiverWakeActivity : ComponentActivity() {
                     isReceiving = isReceivingState.value,
                     progress = transferProgressState.value,
                     deliveredResult = deliveredResultState.value,
-                    onPreviewReady = { pv ->
-                        previewViewRef = pv
-                        gestureDetector?.start(this@ReceiverWakeActivity, pv)
-                    },
                     onDismiss = { finish() }
                 )
             }
@@ -127,22 +123,20 @@ class ReceiverWakeActivity : ComponentActivity() {
             setTurnScreenOn(true)
             val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
             keyguardManager?.requestDismissKeyguard(this, null)
-        } else {
-            @Suppress("DEPRECATION")
-            window.addFlags(
-                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-            )
         }
+        @Suppress("DEPRECATION")
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+            WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+            WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+        )
     }
 
     override fun onResume() {
         super.onResume()
         gestureDetector?.setPowerMode(active = true)
-        previewViewRef?.let {
-            gestureDetector?.start(this, it)
-        }
+        gestureDetector?.start(this)
 
         startDropCountdown()
         observeGestures()
@@ -235,17 +229,22 @@ class ReceiverWakeActivity : ComponentActivity() {
 
         lifecycleScope.launch {
             sharedManager.incomingFiles.collectLatest { incoming ->
-                val javaFile = incoming.payload.asFile()?.asJavaFile()
-                if (javaFile != null) {
-                    val inputStream = FileInputStream(javaFile)
-                    val result = if (mimeType.startsWith("image/") || mimeType.startsWith("video/")) {
-                        payloadSaver.saveMedia(fileName, mimeType, inputStream)
-                    } else if (fileName.endsWith(".zip")) {
-                        payloadSaver.saveAndExtractZip(fileName, inputStream)
-                    } else {
-                        payloadSaver.saveDocumentOrBinary(fileName, inputStream)
+                val inputStream = dev.toruu.airgrab.data.nearby.NearbyConnectionsManager.openPayloadInputStream(
+                    applicationContext,
+                    incoming.payload
+                )
+                if (inputStream != null) {
+                    val result = inputStream.use { stream ->
+                        if (mimeType.startsWith("image/") || mimeType.startsWith("video/")) {
+                            payloadSaver.saveMedia(fileName, mimeType, stream)
+                        } else if (fileName.endsWith(".zip")) {
+                            payloadSaver.saveAndExtractZip(fileName, stream)
+                        } else {
+                            payloadSaver.saveDocumentOrBinary(fileName, stream)
+                        }
                     }
                     deliveredResultState.value = result
+                    isReceivingState.value = false // Stop pulsing animation on delivery
 
                     sharedManager.sendControl(
                         senderEndpointId,
@@ -272,7 +271,6 @@ fun WakeScreenContent(
     isReceiving: Boolean,
     progress: Float?,
     deliveredResult: PayloadSaver.SaveResult?,
-    onPreviewReady: (PreviewView) -> Unit,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
@@ -290,7 +288,7 @@ fun WakeScreenContent(
             .background(Color(0xFF141218))
     ) {
         RadialGlowOverlay(
-            isActive = true,
+            isActive = isReceiving,
             glowColor = MaterialTheme.colorScheme.primary
         )
 
@@ -435,7 +433,7 @@ fun WakeScreenContent(
                 }
             }
 
-            // Bottom: Front Camera PiP Window
+            // Bottom: Touchless Catch Guidance (Headless Camera - No Video Feed)
             Card(
                 shape = RoundedCornerShape(20.dp),
                 colors = CardDefaults.cardColors(
@@ -443,28 +441,26 @@ fun WakeScreenContent(
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(130.dp)
+                    .padding(vertical = 8.dp)
             ) {
                 Row(
                     modifier = Modifier
-                        .fillMaxSize()
-                        .padding(12.dp),
+                        .fillMaxWidth()
+                        .padding(16.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(width = 80.dp, height = 106.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primaryContainer),
+                        contentAlignment = Alignment.Center
                     ) {
-                        AndroidView(
-                            factory = { ctx ->
-                                PreviewView(ctx).apply {
-                                    scaleType = PreviewView.ScaleType.FILL_CENTER
-                                    onPreviewReady(this)
-                                }
-                            },
-                            modifier = Modifier.fillMaxSize()
+                        Icon(
+                            imageVector = Icons.Default.PanTool,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
                         )
                     }
 
@@ -473,12 +469,12 @@ fun WakeScreenContent(
                     Column(verticalArrangement = Arrangement.Center) {
                         Text(
                             text = "Touchless Catch Active",
-                            style = MaterialTheme.typography.bodyMedium,
+                            style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
                         )
-                        Spacer(modifier = Modifier.height(4.dp))
+                        Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = "Face front camera and raise an open palm to drop into your device.",
+                            text = "Raise an open palm toward phone to drop payload.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

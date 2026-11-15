@@ -15,6 +15,7 @@ interface NearbyTransport {
     val connectedPeers: StateFlow<Map<String, String>> // endpointId -> Build.MODEL
     val incomingControl: SharedFlow<Pair<String, ControlMessage>>
     val incomingFiles: SharedFlow<IncomingFilePayload>
+    val outgoingComplete: SharedFlow<Pair<Long, String>> // payloadId -> endpointId
     val transferProgress: StateFlow<Float?> // 0f..1f for large videos/folders
 
     fun startOpenRoom(deviceName: String = android.os.Build.MODEL, isHost: Boolean)

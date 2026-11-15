@@ -45,10 +45,8 @@ fun SenderScreen(
     val gestureResult by viewModel.currentGesture.collectAsState()
     val transferProgress by viewModel.transferProgress.collectAsState()
 
-    var previewViewRef by remember { mutableStateOf<PreviewView?>(null) }
-
-    LaunchedEffect(lifecycleOwner, previewViewRef) {
-        viewModel.bindCamera(lifecycleOwner, previewViewRef)
+    LaunchedEffect(lifecycleOwner) {
+        viewModel.bindCamera(lifecycleOwner)
     }
 
     val isGrabbed = senderState is SenderState.Grabbed
@@ -89,81 +87,80 @@ fun SenderScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween
         ) {
-            // Camera PiP & Gesture State Pill
-            Row(
+            // Touchless Gesture Status Banner (Headless Camera - No Camera Feed)
+            Card(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (gestureResult.gesture == HandGesture.CLOSED_FIST)
+                        MaterialTheme.colorScheme.primaryContainer
+                    else
+                        MaterialTheme.colorScheme.surfaceVariant
+                )
             ) {
-                // Live Camera PiP Box
-                Box(
+                Row(
                     modifier = Modifier
-                        .size(width = 110.dp, height = 140.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    AndroidView(
-                        factory = { ctx ->
-                            PreviewView(ctx).apply {
-                                scaleType = PreviewView.ScaleType.FILL_CENTER
-                                previewViewRef = this
-                            }
-                        },
-                        modifier = Modifier.fillMaxSize()
-                    )
-                }
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (gestureResult.gesture == HandGesture.CLOSED_FIST)
+                                    MaterialTheme.colorScheme.primary
+                                else
+                                    MaterialTheme.colorScheme.surface
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = when (gestureResult.gesture) {
+                                HandGesture.CLOSED_FIST -> Icons.Default.FrontHand
+                                HandGesture.OPEN_PALM -> Icons.Default.PanTool
+                                HandGesture.NONE -> Icons.Default.Visibility
+                            },
+                            contentDescription = null,
+                            tint = if (gestureResult.gesture == HandGesture.CLOSED_FIST)
+                                MaterialTheme.colorScheme.onPrimary
+                            else
+                                MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
 
-                Spacer(modifier = Modifier.width(12.dp))
+                    Spacer(modifier = Modifier.width(14.dp))
 
-                // Gesture Feedback Card
-                Card(
-                    modifier = Modifier.weight(1f),
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (gestureResult.gesture == HandGesture.CLOSED_FIST)
-                            MaterialTheme.colorScheme.primaryContainer
-                        else
-                            MaterialTheme.colorScheme.surfaceVariant
-                    )
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = when (gestureResult.gesture) {
-                                    HandGesture.CLOSED_FIST -> Icons.Default.FrontHand
-                                    HandGesture.OPEN_PALM -> Icons.Default.PanTool
-                                    HandGesture.NONE -> Icons.Default.Visibility
-                                },
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
                             Text(
                                 text = when (gestureResult.gesture) {
-                                    HandGesture.CLOSED_FIST -> "FIST (Grab)"
-                                    HandGesture.OPEN_PALM -> "PALM"
-                                    HandGesture.NONE -> "Tracking Hand..."
+                                    HandGesture.CLOSED_FIST -> "FIST DETECTED (Grab)"
+                                    HandGesture.OPEN_PALM -> "OPEN PALM"
+                                    HandGesture.NONE -> "Waiting for Hand..."
                                 },
                                 fontWeight = FontWeight.Bold,
-                                style = MaterialTheme.typography.bodyMedium
+                                style = MaterialTheme.typography.titleSmall
                             )
+                            val confPercent = (gestureResult.confidence * 100).toInt()
+                            if (confPercent > 0) {
+                                Badge { Text("$confPercent%") }
+                            }
                         }
-
-                        Spacer(modifier = Modifier.height(6.dp))
-
-                        val confPercent = (gestureResult.confidence * 100).toInt()
-                        Text(
-                            text = "Confidence: $confPercent%",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
 
                         Spacer(modifier = Modifier.height(4.dp))
 
                         Text(
-                            text = "Hold Closed Fist for 300ms to grab & broadcast.",
-                            style = MaterialTheme.typography.labelSmall,
+                            text = "Hold closed fist towards phone for 300ms to grab.",
+                            style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }

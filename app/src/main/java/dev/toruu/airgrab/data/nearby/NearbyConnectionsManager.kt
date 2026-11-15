@@ -22,6 +22,19 @@ class NearbyConnectionsManager(
         private const val TAG = "AirGrab_Nearby"
         const val SERVICE_ID = "dev.toruu.airgrab.OPEN_ROOM_V1"
         val STRATEGY: Strategy = Strategy.P2P_STAR
+
+        fun openPayloadInputStream(context: Context, payload: Payload): java.io.InputStream? {
+            val file = payload.asFile() ?: return null
+            val javaFile = file.asJavaFile()
+            if (javaFile != null && javaFile.exists() && javaFile.length() > 0) {
+                return java.io.FileInputStream(javaFile)
+            }
+            val uri = file.asUri()
+            if (uri != null) {
+                return context.contentResolver.openInputStream(uri)
+            }
+            return null
+        }
     }
 
     private val connectionsClient = Nearby.getConnectionsClient(context)
@@ -36,8 +49,14 @@ class NearbyConnectionsManager(
     private val _incomingFiles = MutableSharedFlow<IncomingFilePayload>(extraBufferCapacity = 32)
     override val incomingFiles: SharedFlow<IncomingFilePayload> = _incomingFiles.asSharedFlow()
 
+    private val _outgoingComplete = MutableSharedFlow<Pair<Long, String>>(extraBufferCapacity = 32)
+    override val outgoingComplete: SharedFlow<Pair<Long, String>> = _outgoingComplete.asSharedFlow()
+
     private val _transferProgress = MutableStateFlow<Float?>(null)
     override val transferProgress: StateFlow<Float?> = _transferProgress.asStateFlow()
+
+    private val incomingPayloadMap = java.util.concurrent.ConcurrentHashMap<Long, Pair<String, Payload>>()
+    private val outgoingPayloadMap = java.util.concurrent.ConcurrentHashMap<Long, String>()
 
     private var activeDeviceName: String = Build.MODEL
     private var isHosting: Boolean = false
@@ -56,10 +75,8 @@ class NearbyConnectionsManager(
                     }
                 }
                 Payload.Type.FILE -> {
-                    Log.d(TAG, "Receiving FILE payload ${payload.id} from $endpointId")
-                    scope.launch {
-                        _incomingFiles.emit(IncomingFilePayload(payload.id, endpointId, payload))
-                    }
+                    Log.d(TAG, "Starting to receive FILE payload ${payload.id} from $endpointId (holding until SUCCESS)")
+                    incomingPayloadMap[payload.id] = endpointId to payload
                 }
                 Payload.Type.STREAM -> {
                     Log.d(TAG, "Receiving STREAM payload ${payload.id} from $endpointId")
@@ -79,13 +96,33 @@ class NearbyConnectionsManager(
                     }
                 }
                 PayloadTransferUpdate.Status.SUCCESS -> {
-                    Log.d(TAG, "Payload ${update.payloadId} transfer success with $endpointId")
+                    Log.d(TAG, "Payload ${update.payloadId} transfer SUCCESS with $endpointId")
                     _transferProgress.value = 1f
                     resumeDiscovery()
+
+                    // Check if this was an incoming file payload
+                    val incoming = incomingPayloadMap.remove(update.payloadId)
+                    if (incoming != null) {
+                        Log.d(TAG, "Emitting fully-downloaded FILE payload ${update.payloadId} from ${incoming.first}")
+                        scope.launch {
+                            _incomingFiles.emit(IncomingFilePayload(update.payloadId, incoming.first, incoming.second))
+                        }
+                    }
+
+                    // Check if this was an outgoing upload
+                    val outgoingTarget = outgoingPayloadMap.remove(update.payloadId)
+                    if (outgoingTarget != null) {
+                        Log.d(TAG, "Emitting outgoing upload completion for ${update.payloadId} to $outgoingTarget")
+                        scope.launch {
+                            _outgoingComplete.emit(update.payloadId to outgoingTarget)
+                        }
+                    }
                 }
                 PayloadTransferUpdate.Status.FAILURE,
                 PayloadTransferUpdate.Status.CANCELED -> {
                     Log.w(TAG, "Payload ${update.payloadId} transfer failed/cancelled (${update.status})")
+                    incomingPayloadMap.remove(update.payloadId)
+                    outgoingPayloadMap.remove(update.payloadId)
                     _transferProgress.value = null
                     resumeDiscovery()
                 }
@@ -250,6 +287,7 @@ class NearbyConnectionsManager(
             ?: throw IllegalStateException("Cannot open ParcelFileDescriptor for URI: $uri")
 
         val payload = Payload.fromFile(pfd)
+        outgoingPayloadMap[payload.id] = endpointId
         connectionsClient.sendPayload(endpointId, payload).await()
         Log.d(TAG, "Initiated file payload ${payload.id} ($fileName) to $endpointId")
         return payload.id
@@ -257,6 +295,7 @@ class NearbyConnectionsManager(
 
     override suspend fun sendBytes(endpointId: String, bytes: ByteArray): Long {
         val payload = Payload.fromBytes(bytes)
+        outgoingPayloadMap[payload.id] = endpointId
         connectionsClient.sendPayload(endpointId, payload).await()
         Log.d(TAG, "Sent bytes payload ${payload.id} (${bytes.size} bytes) to $endpointId")
         return payload.id
