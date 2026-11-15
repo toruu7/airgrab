@@ -17,6 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -50,15 +51,23 @@ fun SenderScreen(
     }
 
     val isGrabbed = senderState is SenderState.Grabbed
-    val animatedBlur by animateDpAsState(
-        targetValue = if (isGrabbed) 20.dp else 0.dp,
-        label = "GrabBlur"
+    val animatedScale by animateFloatAsState(
+        targetValue = if (isGrabbed) 0.94f else 1f,
+        label = "GrabScale"
+    )
+    val animatedAlpha by animateFloatAsState(
+        targetValue = if (isGrabbed) 0.75f else 1f,
+        label = "GrabAlpha"
     )
 
     // Trigger haptic tick on grab
     LaunchedEffect(isGrabbed) {
         if (isGrabbed) {
-            view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            try {
+                view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            } catch (e: Exception) {
+                // Ignore if device haptics fail
+            }
         }
     }
 
@@ -217,7 +226,11 @@ fun SenderScreen(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .blur(animatedBlur)
+                                .graphicsLayer {
+                                    scaleX = animatedScale
+                                    scaleY = animatedScale
+                                    alpha = animatedAlpha
+                                }
                         ) {
                             Card(
                                 shape = RoundedCornerShape(24.dp),

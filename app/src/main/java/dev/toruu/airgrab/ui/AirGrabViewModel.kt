@@ -155,34 +155,50 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
 
     private fun onGrabGesture() {
         if (_appMode.value != AppMode.SENDER) return
-        val myEndpointId = nearbyTransport.connectedPeers.value.keys.firstOrNull() ?: "local-sender"
-        val grabReady = stateMachine.onGrabTriggered(myEndpointId, Build.MODEL)
-        if (grabReady != null) {
-            Log.d(TAG, "Grab gesture triggered, broadcasting GrabReady: $grabReady")
-            viewModelScope.launch {
-                nearbyTransport.broadcastControl(grabReady)
+        try {
+            val myEndpointId = nearbyTransport.connectedPeers.value.keys.firstOrNull() ?: "local-sender"
+            val grabReady = stateMachine.onGrabTriggered(myEndpointId, Build.MODEL)
+            if (grabReady != null) {
+                Log.d(TAG, "Grab gesture triggered, broadcasting GrabReady: $grabReady")
+                viewModelScope.launch {
+                    try {
+                        nearbyTransport.broadcastControl(grabReady)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to broadcast GrabReady: ${e.message}", e)
+                    }
+                }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling onGrabGesture: ${e.message}", e)
         }
     }
 
     private fun onDropGesture() {
         if (_appMode.value != AppMode.RECEIVER) return
-        val myEndpointId = nearbyTransport.connectedPeers.value.keys.firstOrNull() ?: "local-receiver"
-        val acceptDrop = stateMachine.onDropTriggered(myEndpointId)
-        if (acceptDrop != null) {
-            Log.d(TAG, "Drop gesture triggered, sending AcceptDrop: $acceptDrop")
-            viewModelScope.launch {
-                val currentArmed = receiverState.value
-                val targetEndpoint = if (currentArmed is ReceiverState.Armed) {
-                    currentArmed.grabReady.senderEndpointId
-                } else {
-                    nearbyTransport.connectedPeers.value.keys.firstOrNull()
-                }
+        try {
+            val myEndpointId = nearbyTransport.connectedPeers.value.keys.firstOrNull() ?: "local-receiver"
+            val acceptDrop = stateMachine.onDropTriggered(myEndpointId)
+            if (acceptDrop != null) {
+                Log.d(TAG, "Drop gesture triggered, sending AcceptDrop: $acceptDrop")
+                viewModelScope.launch {
+                    try {
+                        val currentArmed = receiverState.value
+                        val targetEndpoint = if (currentArmed is ReceiverState.Armed) {
+                            currentArmed.grabReady.senderEndpointId
+                        } else {
+                            nearbyTransport.connectedPeers.value.keys.firstOrNull()
+                        }
 
-                targetEndpoint?.let {
-                    nearbyTransport.sendControl(it, acceptDrop)
+                        targetEndpoint?.let {
+                            nearbyTransport.sendControl(it, acceptDrop)
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to send AcceptDrop: ${e.message}", e)
+                    }
                 }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling onDropGesture: ${e.message}", e)
         }
     }
 

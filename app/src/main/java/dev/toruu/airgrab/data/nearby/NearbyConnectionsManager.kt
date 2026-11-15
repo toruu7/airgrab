@@ -283,20 +283,28 @@ class NearbyConnectionsManager(
     }
 
     override suspend fun broadcastControl(message: ControlMessage) {
-        val bytes = ControlMessageSerializer.encode(message)
-        val payload = Payload.fromBytes(bytes)
-        val peers = _connectedPeers.value.keys.toList()
-        if (peers.isNotEmpty()) {
-            connectionsClient.sendPayload(peers, payload).await()
-            Log.d(TAG, "Broadcasted control message to ${peers.size} peers: $message")
+        try {
+            val bytes = ControlMessageSerializer.encode(message)
+            val payload = Payload.fromBytes(bytes)
+            val peers = _connectedPeers.value.keys.toList()
+            if (peers.isNotEmpty()) {
+                connectionsClient.sendPayload(peers, payload).await()
+                Log.d(TAG, "Broadcasted control message to ${peers.size} peers: $message")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in broadcastControl: ${e.message}", e)
         }
     }
 
     override suspend fun sendControl(endpointId: String, message: ControlMessage) {
-        val bytes = ControlMessageSerializer.encode(message)
-        val payload = Payload.fromBytes(bytes)
-        connectionsClient.sendPayload(endpointId, payload).await()
-        Log.d(TAG, "Sent control message to $endpointId: $message")
+        try {
+            val bytes = ControlMessageSerializer.encode(message)
+            val payload = Payload.fromBytes(bytes)
+            connectionsClient.sendPayload(endpointId, payload).await()
+            Log.d(TAG, "Sent control message to $endpointId: $message")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in sendControl to $endpointId: ${e.message}", e)
+        }
     }
 
     override suspend fun sendFile(
