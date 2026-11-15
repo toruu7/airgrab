@@ -42,7 +42,8 @@ sealed interface ReceiverState {
 class GrabDropStateMachine {
 
     companion object {
-        const val GRAB_READY_TTL_MS = 5000L
+        const val GRAB_READY_TTL_MS = 7000L
+        const val ACTIVE_DROP_WINDOW_MS = 4000L
     }
 
     private val _senderState = MutableStateFlow<SenderState>(SenderState.Idle)

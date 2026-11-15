@@ -8,6 +8,13 @@
 
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <!-- Wake & Background Service Permissions -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <!-- Nearby Connections (Android 12+ / 13+) -->
     <uses-permission
         android:name="android.permission.BLUETOOTH"
@@ -84,6 +91,23 @@
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
             </intent-filter>
         </service>
+
+        <!-- Background Low-Power BLE Discovery Service -->
+        <service
+            android:name=".service.AirGrabDiscoveryService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!-- Asynchronous Wake Activity (Screen-On Over Lock Screen) -->
+        <activity
+            android:name=".ui.ReceiverWakeActivity"
+            android:exported="false"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:showForAllUsers="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.AirGrab" />
     </application>
 
 </manifest>

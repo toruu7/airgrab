@@ -70,6 +70,8 @@ class NearbyConnectionsManager(
         override fun onPayloadTransferUpdate(endpointId: String, update: PayloadTransferUpdate) {
             when (update.status) {
                 PayloadTransferUpdate.Status.IN_PROGRESS -> {
+                    // Pause discovery to prevent antenna coexistence contention on 2.4 GHz
+                    pauseDiscovery()
                     val total = update.totalBytes
                     if (total > 0) {
                         val progress = update.bytesTransferred.toFloat() / total.toFloat()
@@ -79,11 +81,13 @@ class NearbyConnectionsManager(
                 PayloadTransferUpdate.Status.SUCCESS -> {
                     Log.d(TAG, "Payload ${update.payloadId} transfer success with $endpointId")
                     _transferProgress.value = 1f
+                    resumeDiscovery()
                 }
                 PayloadTransferUpdate.Status.FAILURE,
                 PayloadTransferUpdate.Status.CANCELED -> {
                     Log.w(TAG, "Payload ${update.payloadId} transfer failed/cancelled (${update.status})")
                     _transferProgress.value = null
+                    resumeDiscovery()
                 }
             }
         }
@@ -194,7 +198,29 @@ class NearbyConnectionsManager(
             .addOnSuccessListener {
                 Log.d(TAG, "Cancelled payload $payloadId")
                 _transferProgress.value = null
+                resumeDiscovery()
             }
+    }
+
+    private var isDiscoveryPaused: Boolean = false
+
+    override fun pauseDiscovery() {
+        if (!isHosting && !isDiscoveryPaused) {
+            isDiscoveryPaused = true
+            connectionsClient.stopDiscovery()
+            Log.d(TAG, "Paused BLE discovery to optimize Wi-Fi Direct streaming")
+        }
+    }
+
+    override fun resumeDiscovery() {
+        if (!isHosting && isDiscoveryPaused) {
+            isDiscoveryPaused = false
+            val discoveryOptions = DiscoveryOptions.Builder()
+                .setStrategy(STRATEGY)
+                .build()
+            connectionsClient.startDiscovery(SERVICE_ID, endpointDiscoveryCallback, discoveryOptions)
+            Log.d(TAG, "Resumed BLE discovery after payload transfer")
+        }
     }
 
     override suspend fun broadcastControl(message: ControlMessage) {

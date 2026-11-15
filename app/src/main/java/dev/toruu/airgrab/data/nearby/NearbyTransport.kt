@@ -24,4 +24,6 @@ interface NearbyTransport {
     suspend fun sendControl(endpointId: String, message: ControlMessage)
     suspend fun sendFile(endpointId: String, uri: Uri, fileName: String, mimeType: String): Long
     suspend fun sendBytes(endpointId: String, bytes: ByteArray): Long
+    fun pauseDiscovery()
+    fun resumeDiscovery()
 }

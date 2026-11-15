@@ -124,6 +124,64 @@ fun HomeScreen(
             }
 
             item {
+                val context = androidx.compose.ui.platform.LocalContext.current
+                var isServiceEnabled by androidx.compose.runtime.remember {
+                    androidx.compose.runtime.mutableStateOf(dev.toruu.airgrab.service.AirGrabDiscoveryService.isServiceRunning)
+                }
+
+                Card(
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .padding(16.dp)
+                            .fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.Sensors,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Ambient Screen-Off Wake",
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.titleSmall
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Listen via low-power BLE and wake screen on grab.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        Switch(
+                            checked = isServiceEnabled,
+                            onCheckedChange = { enable ->
+                                isServiceEnabled = enable
+                                if (enable) {
+                                    dev.toruu.airgrab.service.AirGrabDiscoveryService.start(context)
+                                } else {
+                                    dev.toruu.airgrab.service.AirGrabDiscoveryService.stop(context)
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+
+            item {
                 Text(
                     text = "Transfer Modes",
                     style = MaterialTheme.typography.titleMedium,
