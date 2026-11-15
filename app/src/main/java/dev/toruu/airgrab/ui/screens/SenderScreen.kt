@@ -1,0 +1,409 @@
+package dev.toruu.airgrab.ui.screens
+
+import android.text.format.Formatter
+import android.view.HapticFeedbackConstants
+import androidx.camera.view.PreviewView
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import coil3.compose.AsyncImage
+import dev.toruu.airgrab.data.payload.TransferPayload
+import dev.toruu.airgrab.data.vision.HandGesture
+import dev.toruu.airgrab.domain.SenderState
+import dev.toruu.airgrab.ui.AirGrabViewModel
+import dev.toruu.airgrab.ui.AppMode
+
+@Composable
+fun SenderScreen(
+    viewModel: AirGrabViewModel,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val view = LocalView.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val senderState by viewModel.senderState.collectAsState()
+    val gestureResult by viewModel.currentGesture.collectAsState()
+    val transferProgress by viewModel.transferProgress.collectAsState()
+
+    var previewViewRef by remember { mutableStateOf<PreviewView?>(null) }
+
+    LaunchedEffect(lifecycleOwner, previewViewRef) {
+        viewModel.bindCamera(lifecycleOwner, previewViewRef)
+    }
+
+    val isGrabbed = senderState is SenderState.Grabbed
+    val animatedBlur by animateDpAsState(
+        targetValue = if (isGrabbed) 20.dp else 0.dp,
+        label = "GrabBlur"
+    )
+
+    // Trigger haptic tick on grab
+    LaunchedEffect(isGrabbed) {
+        if (isGrabbed) {
+            view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Sender Mode", fontWeight = FontWeight.Bold) },
+                navigationIcon = {
+                    IconButton(onClick = { viewModel.setAppMode(AppMode.HOME) }) {
+                        Icon(imageVector = Icons.Default.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { viewModel.cancelTransfer() }) {
+                        Icon(imageVector = Icons.Default.Close, contentDescription = "Cancel/Reset")
+                    }
+                }
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            // Camera PiP & Gesture State Pill
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Live Camera PiP Box
+                Box(
+                    modifier = Modifier
+                        .size(width = 110.dp, height = 140.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    AndroidView(
+                        factory = { ctx ->
+                            PreviewView(ctx).apply {
+                                scaleType = PreviewView.ScaleType.FILL_CENTER
+                                previewViewRef = this
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                // Gesture Feedback Card
+                Card(
+                    modifier = Modifier.weight(1f),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (gestureResult.gesture == HandGesture.CLOSED_FIST)
+                            MaterialTheme.colorScheme.primaryContainer
+                        else
+                            MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = when (gestureResult.gesture) {
+                                    HandGesture.CLOSED_FIST -> Icons.Default.FrontHand
+                                    HandGesture.OPEN_PALM -> Icons.Default.PanTool
+                                    HandGesture.NONE -> Icons.Default.Visibility
+                                },
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = when (gestureResult.gesture) {
+                                    HandGesture.CLOSED_FIST -> "FIST (Grab)"
+                                    HandGesture.OPEN_PALM -> "PALM"
+                                    HandGesture.NONE -> "Tracking Hand..."
+                                },
+                                fontWeight = FontWeight.Bold,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        val confPercent = (gestureResult.confidence * 100).toInt()
+                        Text(
+                            text = "Confidence: $confPercent%",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        Text(
+                            text = "Hold Closed Fist for 300ms to grab & broadcast.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            // Main Payload Display with Blur-on-Grab Effect
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(vertical = 12.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                when (val state = senderState) {
+                    is SenderState.Idle -> {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CloudUpload,
+                                contentDescription = null,
+                                modifier = Modifier.size(72.dp),
+                                tint = MaterialTheme.colorScheme.outline
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "No payload staged",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Share via Samsung Gallery / Share Sheet, or pick a file on Home screen.",
+                                style = MaterialTheme.typography.bodySmall,
+                                textAlign = TextAlign.Center,
+                                color = MaterialTheme.colorScheme.outline
+                            )
+                        }
+                    }
+
+                    is SenderState.Staged,
+                    is SenderState.Grabbed,
+                    is SenderState.Transferring -> {
+                        val payload = when (state) {
+                            is SenderState.Staged -> state.payload
+                            is SenderState.Grabbed -> state.payload
+                            is SenderState.Transferring -> state.payload
+                            else -> null
+                        }
+
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .blur(animatedBlur)
+                        ) {
+                            Card(
+                                shape = RoundedCornerShape(24.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(260.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                                )
+                            ) {
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    when (payload) {
+                                        is TransferPayload.MediaItem -> {
+                                            AsyncImage(
+                                                model = payload.uri,
+                                                contentDescription = payload.displayName,
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                        }
+                                        is TransferPayload.FolderArchive -> {
+                                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                                Icon(
+                                                    imageVector = Icons.Default.FolderZip,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(64.dp),
+                                                    tint = MaterialTheme.colorScheme.primary
+                                                )
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                Text(
+                                                    text = "${payload.fileCount} Files Zipped",
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                        }
+                                        is TransferPayload.TextOrLink -> {
+                                            Column(
+                                                modifier = Modifier.padding(20.dp),
+                                                horizontalAlignment = Alignment.CenterHorizontally
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (payload.isUrl) Icons.Default.Link else Icons.Default.Notes,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(54.dp),
+                                                    tint = MaterialTheme.colorScheme.primary
+                                                )
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                Text(
+                                                    text = payload.content,
+                                                    maxLines = 4,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    textAlign = TextAlign.Center
+                                                )
+                                            }
+                                        }
+                                        is TransferPayload.BinaryFile, null -> {
+                                            Icon(
+                                                imageVector = Icons.Default.InsertDriveFile,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(64.dp),
+                                                tint = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(14.dp))
+
+                            Text(
+                                text = payload?.displayName ?: "",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+
+                            if (payload != null && payload.totalBytes > 0) {
+                                Text(
+                                    text = Formatter.formatFileSize(context, payload.totalBytes),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        // Grabbed Overlay Notice
+                        if (isGrabbed) {
+                            Card(
+                                shape = RoundedCornerShape(20.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.primary
+                                ),
+                                modifier = Modifier.padding(horizontal = 24.dp)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(20.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onPrimary,
+                                        modifier = Modifier.size(36.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Text(
+                                        text = "GRAB ACTIVE!",
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onPrimary,
+                                        style = MaterialTheme.typography.titleMedium
+                                    )
+                                    Text(
+                                        text = "Broadcasting to room. Receiver: open palm to release.",
+                                        textAlign = TextAlign.Center,
+                                        color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.9f),
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    is SenderState.Sent -> {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(80.dp)
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "Transfer Successful!",
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = state.displayName,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Transfer Progress Bar & Action Bottom Area
+            if (senderState is SenderState.Transferring) {
+                val progress = transferProgress ?: 0f
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    val animatedProgress by animateFloatAsState(targetValue = progress, label = "Progress")
+                    LinearProgressIndicator(
+                        progress = { animatedProgress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(8.dp)
+                            .clip(CircleShape)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Transferring: ${(progress * 100).toInt()}%",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(onClick = { viewModel.cancelTransfer() }) {
+                        Text("Cancel Transfer")
+                    }
+                }
+            }
+        }
+    }
+}

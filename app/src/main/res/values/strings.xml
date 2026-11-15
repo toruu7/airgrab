@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">AirGrab</string>
+    <string name="tile_receiver_label">AirGrab Receive</string>
+    <string name="tile_receiver_description">Toggle AirGrab gesture receiver mode</string>
+</resources>
