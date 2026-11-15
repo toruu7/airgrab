@@ -24,14 +24,28 @@ class NearbyConnectionsManager(
         val STRATEGY: Strategy = Strategy.P2P_STAR
 
         fun openPayloadInputStream(context: Context, payload: Payload): java.io.InputStream? {
-            val file = payload.asFile() ?: return null
-            val javaFile = file.asJavaFile()
-            if (javaFile != null && javaFile.exists() && javaFile.length() > 0) {
-                return java.io.FileInputStream(javaFile)
-            }
-            val uri = file.asUri()
-            if (uri != null) {
-                return context.contentResolver.openInputStream(uri)
+            try {
+                val file = payload.asFile() ?: return null
+
+                // 1. Modern Android 10+ / Scoped Storage: ParcelFileDescriptor
+                val pfd = file.asParcelFileDescriptor()
+                if (pfd != null) {
+                    return ParcelFileDescriptor.AutoCloseInputStream(pfd)
+                }
+
+                // 2. Direct File access
+                val javaFile = file.asJavaFile()
+                if (javaFile != null && javaFile.exists() && javaFile.length() > 0) {
+                    return java.io.FileInputStream(javaFile)
+                }
+
+                // 3. Content URI
+                val uri = file.asUri()
+                if (uri != null) {
+                    return context.contentResolver.openInputStream(uri)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error opening payload input stream: ${e.message}", e)
             }
             return null
         }
@@ -85,6 +99,14 @@ class NearbyConnectionsManager(
         }
 
         override fun onPayloadTransferUpdate(endpointId: String, update: PayloadTransferUpdate) {
+            val isIncomingFile = incomingPayloadMap.containsKey(update.payloadId)
+            val isOutgoing = outgoingPayloadMap.containsKey(update.payloadId)
+
+            // Ignore control message (BYTES) progress so it doesn't prematurely trigger 100%
+            if (!isIncomingFile && !isOutgoing) {
+                return
+            }
+
             when (update.status) {
                 PayloadTransferUpdate.Status.IN_PROGRESS -> {
                     // Pause discovery to prevent antenna coexistence contention on 2.4 GHz

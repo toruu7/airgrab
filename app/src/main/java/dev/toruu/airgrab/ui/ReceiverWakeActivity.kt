@@ -229,27 +229,31 @@ class ReceiverWakeActivity : ComponentActivity() {
 
         lifecycleScope.launch {
             sharedManager.incomingFiles.collectLatest { incoming ->
-                val inputStream = dev.toruu.airgrab.data.nearby.NearbyConnectionsManager.openPayloadInputStream(
-                    applicationContext,
-                    incoming.payload
-                )
-                if (inputStream != null) {
-                    val result = inputStream.use { stream ->
-                        if (mimeType.startsWith("image/") || mimeType.startsWith("video/")) {
-                            payloadSaver.saveMedia(fileName, mimeType, stream)
-                        } else if (fileName.endsWith(".zip")) {
-                            payloadSaver.saveAndExtractZip(fileName, stream)
-                        } else {
-                            payloadSaver.saveDocumentOrBinary(fileName, stream)
-                        }
-                    }
-                    deliveredResultState.value = result
-                    isReceivingState.value = false // Stop pulsing animation on delivery
-
-                    sharedManager.sendControl(
-                        senderEndpointId,
-                        ControlMessage.TransferComplete(sessionId = sessionId, success = true)
+                try {
+                    val inputStream = dev.toruu.airgrab.data.nearby.NearbyConnectionsManager.openPayloadInputStream(
+                        applicationContext,
+                        incoming.payload
                     )
+                    if (inputStream != null) {
+                        val result = inputStream.use { stream ->
+                            if (mimeType.startsWith("image/") || mimeType.startsWith("video/")) {
+                                payloadSaver.saveMedia(fileName, mimeType, stream)
+                            } else if (fileName.endsWith(".zip")) {
+                                payloadSaver.saveAndExtractZip(fileName, stream)
+                            } else {
+                                payloadSaver.saveDocumentOrBinary(fileName, stream)
+                            }
+                        }
+                        deliveredResultState.value = result
+                        isReceivingState.value = false // Stop pulsing animation on delivery
+
+                        sharedManager.sendControl(
+                            senderEndpointId,
+                            ControlMessage.TransferComplete(sessionId = sessionId, success = true)
+                        )
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("ReceiverWakeActivity", "Failed to process incoming file: ${e.message}", e)
                 }
             }
         }

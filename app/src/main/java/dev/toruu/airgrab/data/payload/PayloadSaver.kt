@@ -37,46 +37,53 @@ class PayloadSaver(private val context: Context) {
         fileName: String,
         mimeType: String,
         inputStream: InputStream
-    ): SaveResult.MediaSaved = withContext(Dispatchers.IO) {
-        val isVideo = mimeType.startsWith("video/")
-        val collectionUri = if (isVideo) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    ): SaveResult = withContext(Dispatchers.IO) {
+        try {
+            val isVideo = mimeType.startsWith("video/")
+            val collectionUri = if (isVideo) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                } else {
+                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                }
             } else {
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                } else {
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                }
             }
-        } else {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-            } else {
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+
+            val contentValues = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, DIRECTORY_AIRGRAB_PICTURES)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
             }
-        }
 
-        val contentValues = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
-            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.MediaColumns.RELATIVE_PATH, DIRECTORY_AIRGRAB_PICTURES)
-                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            val itemUri = context.contentResolver.insert(collectionUri, contentValues)
+            if (itemUri != null) {
+                context.contentResolver.openOutputStream(itemUri)?.use { out ->
+                    inputStream.copyTo(out)
+                }
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    contentValues.clear()
+                    contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    context.contentResolver.update(itemUri, contentValues, null, null)
+                }
+
+                Log.d(TAG, "Media successfully saved to MediaStore: $itemUri ($fileName)")
+                return@withContext SaveResult.MediaSaved(itemUri, fileName)
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to save via MediaStore, falling back to Downloads/AirGrab: ${e.message}", e)
         }
 
-        val itemUri = context.contentResolver.insert(collectionUri, contentValues)
-            ?: throw IllegalStateException("Failed to insert MediaStore record for $fileName")
-
-        context.contentResolver.openOutputStream(itemUri)?.use { out ->
-            inputStream.copyTo(out)
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            contentValues.clear()
-            contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
-            context.contentResolver.update(itemUri, contentValues, null, null)
-        }
-
-        Log.d(TAG, "Media successfully saved to MediaStore: $itemUri ($fileName)")
-        SaveResult.MediaSaved(itemUri, fileName)
+        // Resilient fallback to Downloads/AirGrab if MediaStore fails
+        saveDocumentOrBinary(fileName, inputStream)
     }
 
     suspend fun saveDocumentOrBinary(

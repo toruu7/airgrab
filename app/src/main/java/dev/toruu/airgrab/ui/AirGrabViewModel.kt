@@ -186,11 +186,29 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private fun wakeScreen() {
+        try {
+            val powerManager = context.getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager
+            @Suppress("DEPRECATION")
+            val wakeLock = powerManager?.newWakeLock(
+                android.os.PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                android.os.PowerManager.ON_AFTER_RELEASE,
+                "airgrab:receiver_wake"
+            )
+            wakeLock?.acquire(7000L)
+            Log.d(TAG, "Screen wakeLock acquired for incoming drop")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to acquire screen wakeLock: ${e.message}")
+        }
+    }
+
     private fun observeIncomingControl() {
         viewModelScope.launch {
             nearbyTransport.incomingControl.collect { (endpointId, message) ->
                 when (message) {
                     is ControlMessage.GrabReady -> {
+                        wakeScreen()
                         stateMachine.onGrabReadyReceived(message)
                         gestureDetector.setPowerMode(active = true) // Boost to 30 fps for drop
                     }
@@ -274,24 +292,31 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
                 val mimeType = grabReady?.mimeType ?: "application/octet-stream"
                 val payloadType = grabReady?.payloadType ?: "FILE"
 
-                val inputStream = NearbyConnectionsManager.openPayloadInputStream(context, incoming.payload)
-                if (inputStream != null) {
-                    val result = inputStream.use { stream ->
-                        when (payloadType) {
-                            "MEDIA" -> payloadSaver.saveMedia(fileName, mimeType, stream)
-                            "FOLDER_ZIP" -> payloadSaver.saveAndExtractZip(fileName, stream)
-                            else -> payloadSaver.saveDocumentOrBinary(fileName, stream)
+                try {
+                    val inputStream = NearbyConnectionsManager.openPayloadInputStream(context, incoming.payload)
+                    if (inputStream != null) {
+                        val result = inputStream.use { stream ->
+                            when (payloadType) {
+                                "MEDIA" -> payloadSaver.saveMedia(fileName, mimeType, stream)
+                                "FOLDER_ZIP" -> payloadSaver.saveAndExtractZip(fileName, stream)
+                                else -> payloadSaver.saveDocumentOrBinary(fileName, stream)
+                            }
                         }
-                    }
-                    stateMachine.onReceiverDelivered(result)
-                    hysteresis.startCooldown()
+                        Log.d(TAG, "File successfully processed and saved: $fileName ($result)")
+                        stateMachine.onReceiverDelivered(result)
+                        hysteresis.startCooldown()
 
-                    // Send TransferComplete back to sender
-                    val sessionId = grabReady?.sessionId ?: ""
-                    nearbyTransport.sendControl(
-                        incoming.endpointId,
-                        ControlMessage.TransferComplete(sessionId = sessionId, success = true)
-                    )
+                        // Send TransferComplete back to sender
+                        val sessionId = grabReady?.sessionId ?: ""
+                        nearbyTransport.sendControl(
+                            incoming.endpointId,
+                            ControlMessage.TransferComplete(sessionId = sessionId, success = true)
+                        )
+                    } else {
+                        Log.e(TAG, "openPayloadInputStream returned null for payload ${incoming.payloadId}")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error saving received file: ${e.message}", e)
                 }
             }
         }

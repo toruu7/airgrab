@@ -4,6 +4,8 @@ import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.RingtoneManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -85,8 +87,8 @@ class AirGrabDiscoveryService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_START -> {
-                // Ensure discovery is active
-                nearbyTransport?.startOpenRoom(Build.MODEL, isHost = false)
+                // Ensure advertising is active as host for ambient drops
+                nearbyTransport?.startOpenRoom(Build.MODEL, isHost = true)
             }
         }
         return START_STICKY
@@ -105,6 +107,7 @@ class AirGrabDiscoveryService : Service() {
                 setShowBadge(false)
             }
 
+            val ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
             val wakeChannel = NotificationChannel(
                 CHANNEL_WAKE_ID,
                 "AirGrab Incoming Drop Alert",
@@ -112,8 +115,15 @@ class AirGrabDiscoveryService : Service() {
             ).apply {
                 description = "Wakes display and notifies when a peer initiates a Grab"
                 enableVibration(true)
-                vibrationPattern = longArrayOf(0, 150, 75, 150)
+                vibrationPattern = longArrayOf(0, 200, 100, 200)
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                setSound(
+                    ringtoneUri,
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_COMMUNICATION_INSTANT)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build()
+                )
             }
 
             notificationManager.createNotificationChannel(serviceChannel)
@@ -151,8 +161,8 @@ class AirGrabDiscoveryService : Service() {
             startForeground(SERVICE_NOTIFICATION_ID, notification)
         }
 
-        nearbyTransport?.startOpenRoom(Build.MODEL, isHost = false)
-        Log.d(TAG, "AirGrabDiscoveryService started in foreground with connectedDevice type")
+        nearbyTransport?.startOpenRoom(Build.MODEL, isHost = true)
+        Log.d(TAG, "AirGrabDiscoveryService started in foreground with connectedDevice type (hosting open room)")
     }
 
     private fun listenForGrabSignals() {
@@ -184,14 +194,14 @@ class AirGrabDiscoveryService : Service() {
 
         Log.d(TAG, "Grab signal detected from ${grabReady.senderName} (${grabReady.fileName}). Waking screen...")
 
-        // Robust wake lock to turn on screen across modern Samsung/Android devices
+        // Robust wake lock to turn on screen across modern Samsung/Honor/Android devices
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         @Suppress("DEPRECATION")
         val wakeLock = powerManager.newWakeLock(
-            PowerManager.FULL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.ON_AFTER_RELEASE,
+            PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.ON_AFTER_RELEASE,
             "airgrab:wake_alert"
         )
-        wakeLock.acquire(5000L)
+        wakeLock.acquire(8000L)
 
         val wakeIntent = Intent(this, ReceiverWakeActivity::class.java).apply {
             putExtra(ReceiverWakeActivity.EXTRA_SESSION_ID, grabReady.sessionId)
@@ -202,18 +212,16 @@ class AirGrabDiscoveryService : Service() {
             putExtra(ReceiverWakeActivity.EXTRA_SIZE_BYTES, grabReady.sizeBytes)
             putExtra(ReceiverWakeActivity.EXTRA_EXPIRES_AT, grabReady.expiresAtEpochMs)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
                     Intent.FLAG_ACTIVITY_CLEAR_TOP or
                     Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
 
         // Direct Activity Launch (permitted when SYSTEM_ALERT_WINDOW is granted or keyguard locked)
-        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
-        if (android.provider.Settings.canDrawOverlays(this) || (keyguardManager != null && keyguardManager.isKeyguardLocked)) {
-            try {
-                startActivity(wakeIntent)
-            } catch (e: Exception) {
-                Log.w(TAG, "Direct startActivity deferred to FullScreenIntent: ${e.message}")
-            }
+        try {
+            startActivity(wakeIntent)
+        } catch (e: Exception) {
+            Log.w(TAG, "Direct startActivity deferred to FullScreenIntent: ${e.message}")
         }
 
         val fullScreenPendingIntent = PendingIntent.getActivity(
