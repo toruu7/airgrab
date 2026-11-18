@@ -3,37 +3,44 @@ package dev.toruu.airgrab.ui
 import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
+import android.graphics.Color as AndroidColor
 import android.os.Build
 import android.os.Bundle
 import android.text.format.Formatter
 import android.view.HapticFeedbackConstants
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.camera.view.PreviewView
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.PanTool
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
-import dev.toruu.airgrab.AirGrabTheme
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import dev.toruu.airgrab.AirGrabApp
 import dev.toruu.airgrab.data.nearby.ControlMessage
@@ -43,13 +50,15 @@ import dev.toruu.airgrab.data.vision.HandGesture
 import dev.toruu.airgrab.data.vision.MediaPipeGestureDetector
 import dev.toruu.airgrab.domain.GestureEvent
 import dev.toruu.airgrab.domain.GestureHysteresis
-import dev.toruu.airgrab.ui.components.RadialGlowOverlay
 import dev.toruu.airgrab.ui.components.spatialAura
+import dev.toruu.airgrab.ui.screens.DeliveredCard
+import dev.toruu.airgrab.ui.theme.AirGrabMotion
+import dev.toruu.airgrab.ui.theme.AirGrabTheme
+import dev.toruu.airgrab.ui.theme.LocalAirGrabPalette
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import java.io.FileInputStream
 
 class ReceiverWakeActivity : ComponentActivity() {
 
@@ -62,8 +71,6 @@ class ReceiverWakeActivity : ComponentActivity() {
         const val EXTRA_SIZE_BYTES = "extra_size_bytes"
         const val EXTRA_EXPIRES_AT = "extra_expires_at"
 
-        // The countdown starts when the screen appears, so leave time for the camera to warm up
-        // and for the user to react. The sender keeps the session alive for 15s.
         private const val ACTIVE_DROP_WINDOW_MS = 12_000L
     }
 
@@ -76,38 +83,32 @@ class ReceiverWakeActivity : ComponentActivity() {
 
     private var sessionId: String = ""
     private var senderEndpointId: String = ""
-    private var senderName: String = ""
-    private var fileName: String = ""
-    private var mimeType: String = ""
-    private var sizeBytes: Long = 0L
+    private val senderNameState = mutableStateOf("Nearby Peer")
+    private val fileNameState = mutableStateOf("Shared Item")
+    private var mimeType: String = "application/octet-stream"
+    private val sizeBytesState = mutableStateOf(0L)
 
     private val isReceivingState = mutableStateOf(false)
     private val transferProgressState = mutableStateOf<Float?>(null)
     private val deliveredResultState = mutableStateOf<PayloadSaver.SaveResult?>(null)
+    private val errorMessageState = mutableStateOf<String?>(null)
     private val remainingDropWindowMs = mutableStateOf(ACTIVE_DROP_WINDOW_MS)
+    private val gestureConfidenceState = mutableStateOf(0f)
+    private val handPresentState = mutableStateOf(false)
 
     private var countdownJob: Job? = null
-    private var previewViewRef: PreviewView? = null
+    private var gestureJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.auto(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.auto(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT)
+        )
         configureLockScreenWindow()
 
         payloadSaver = PayloadSaver(applicationContext)
-
-        sessionId = intent.getStringExtra(EXTRA_SESSION_ID) ?: ""
-        senderEndpointId = intent.getStringExtra(EXTRA_SENDER_ENDPOINT_ID) ?: ""
-        senderName = intent.getStringExtra(EXTRA_SENDER_NAME) ?: "Nearby Peer"
-        fileName = intent.getStringExtra(EXTRA_FILE_NAME) ?: "Shared Item"
-        mimeType = intent.getStringExtra(EXTRA_MIME_TYPE) ?: "application/octet-stream"
-        sizeBytes = intent.getLongExtra(EXTRA_SIZE_BYTES, 0L)
-
-        // The in-app unified screen already owns this session - do not duplicate the drop UI.
-        if (AirGrabApp.from(this).activeReceiverSessionId == sessionId) {
-            finish()
-            return
-        }
+        if (!readExtras(intent)) return
 
         gestureDetector = MediaPipeGestureDetector(applicationContext)
 
@@ -117,17 +118,52 @@ class ReceiverWakeActivity : ComponentActivity() {
         setContent {
             AirGrabTheme {
                 WakeScreenContent(
-                    senderName = senderName,
-                    fileName = fileName,
-                    sizeBytes = sizeBytes,
+                    senderName = senderNameState.value,
+                    fileName = fileNameState.value,
+                    sizeBytes = sizeBytesState.value,
                     remainingMs = remainingDropWindowMs.value,
+                    totalWindowMs = ACTIVE_DROP_WINDOW_MS,
                     isReceiving = isReceivingState.value,
                     progress = transferProgressState.value,
                     deliveredResult = deliveredResultState.value,
+                    errorMessage = errorMessageState.value,
+                    gestureConfidence = if (handPresentState.value) gestureConfidenceState.value else 0f,
                     onDismiss = { finish() }
                 )
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (readExtras(intent)) {
+            startDropCountdown()
+        }
+    }
+
+    private fun readExtras(intent: Intent?): Boolean {
+        if (intent == null) return false
+        val newSessionId = intent.getStringExtra(EXTRA_SESSION_ID) ?: ""
+        if (AirGrabApp.from(this).activeReceiverSessionId == newSessionId && newSessionId.isNotBlank()) {
+            finish()
+            return false
+        }
+
+        sessionId = newSessionId
+        senderEndpointId = intent.getStringExtra(EXTRA_SENDER_ENDPOINT_ID) ?: ""
+        senderNameState.value = intent.getStringExtra(EXTRA_SENDER_NAME) ?: "Nearby Peer"
+        fileNameState.value = intent.getStringExtra(EXTRA_FILE_NAME) ?: "Shared Item"
+        mimeType = intent.getStringExtra(EXTRA_MIME_TYPE) ?: "application/octet-stream"
+        sizeBytesState.value = intent.getLongExtra(EXTRA_SIZE_BYTES, 0L)
+
+        isReceivingState.value = false
+        transferProgressState.value = null
+        deliveredResultState.value = null
+        errorMessageState.value = null
+        remainingDropWindowMs.value = ACTIVE_DROP_WINDOW_MS
+        hysteresis.resetState()
+        return true
     }
 
     private fun configureLockScreenWindow() {
@@ -158,7 +194,8 @@ class ReceiverWakeActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         countdownJob?.cancel()
-        gestureDetector?.stop()
+        gestureJob?.cancel()
+        gestureDetector?.unbindCamera()
     }
 
     private fun startDropCountdown() {
@@ -170,8 +207,7 @@ class ReceiverWakeActivity : ComponentActivity() {
                 val remaining = (ACTIVE_DROP_WINDOW_MS - elapsed).coerceAtLeast(0L)
                 remainingDropWindowMs.value = remaining
 
-                if (remaining <= 0L && !isReceivingState.value) {
-                    // Time out, dismiss and let screen turn off
+                if (remaining <= 0L && !isReceivingState.value && deliveredResultState.value == null) {
                     finish()
                     break
                 }
@@ -182,10 +218,16 @@ class ReceiverWakeActivity : ComponentActivity() {
 
     private fun observeGestures() {
         val detector = gestureDetector ?: return
-        lifecycleScope.launch {
-            detector.gestures.collectLatest { frame ->
+        gestureJob?.cancel()
+        gestureJob = lifecycleScope.launch {
+            detector.gestures.collect { frame ->
+                handPresentState.value = frame.gesture != HandGesture.NONE
+                gestureConfidenceState.value = frame.confidence
                 val event = hysteresis.processFrame(frame)
-                if (event is GestureEvent.DropTriggered && !isReceivingState.value) {
+                if (event is GestureEvent.DropTriggered &&
+                    !isReceivingState.value &&
+                    deliveredResultState.value == null
+                ) {
                     onDropAccepted()
                 }
             }
@@ -194,6 +236,7 @@ class ReceiverWakeActivity : ComponentActivity() {
 
     private fun onDropAccepted() {
         isReceivingState.value = true
+        errorMessageState.value = null
         countdownJob?.cancel()
 
         lifecycleScope.launch {
@@ -207,20 +250,20 @@ class ReceiverWakeActivity : ComponentActivity() {
 
     private fun observeControlMessages() {
         lifecycleScope.launch {
-            transport.incomingControl.collectLatest { (_, message) ->
+            transport.incomingControl.collect { (_, message) ->
                 when (message) {
                     is ControlMessage.SessionClaimed -> {
                         if (message.sessionId == sessionId && message.claimedByEndpointId != deviceId) {
-                            // Another peer claimed the drop
                             finish()
                         }
                     }
                     is ControlMessage.TextContent -> {
-                        if (message.sessionId != sessionId) return@collectLatest
+                        if (message.sessionId != sessionId) return@collect
                         val result = payloadSaver.saveTextToClipboard(message.text, message.isUrl)
                         deliveredResultState.value = result
                         isReceivingState.value = false
                         hysteresis.startCooldown()
+                        transport.resetProgress()
                         transport.sendControl(
                             senderEndpointId,
                             ControlMessage.TransferComplete(sessionId = sessionId, success = true)
@@ -228,6 +271,10 @@ class ReceiverWakeActivity : ComponentActivity() {
                     }
                     is ControlMessage.TransferComplete -> {
                         if (message.sessionId == sessionId) {
+                            if (!message.success) {
+                                isReceivingState.value = false
+                                errorMessageState.value = message.errorMessage ?: "Transfer interrupted"
+                            }
                             hysteresis.startCooldown()
                         }
                     }
@@ -245,11 +292,18 @@ class ReceiverWakeActivity : ComponentActivity() {
         }
 
         lifecycleScope.launch {
+            transport.transferFailed.collect {
+                if (isReceivingState.value && deliveredResultState.value == null) {
+                    isReceivingState.value = false
+                    errorMessageState.value = "Transfer interrupted"
+                    transport.resetProgress()
+                }
+            }
+        }
+
+        lifecycleScope.launch {
             transport.incomingFiles.collectLatest { incoming ->
-                // Only handle the session this activity accepted; the in-app receiver shares
-                // the same transport and would otherwise save the file twice.
                 if (sessionId.isNotBlank() && incoming.sessionId.isNotBlank() && incoming.sessionId != sessionId) {
-                    android.util.Log.w("ReceiverWakeActivity", "Ignoring payload for another session")
                     return@collectLatest
                 }
                 try {
@@ -258,7 +312,7 @@ class ReceiverWakeActivity : ComponentActivity() {
                         incoming.payload
                     ) ?: throw IllegalStateException("Cannot open stream for payload ${incoming.payloadId}")
 
-                    val name = incoming.fileName.takeIf { it.isNotBlank() } ?: fileName
+                    val name = incoming.fileName.takeIf { it.isNotBlank() } ?: fileNameState.value
                     val mime = incoming.mimeType.takeIf { it.isNotBlank() } ?: mimeType
                     val kind = incoming.transferKind.takeIf { it.isNotBlank() }
 
@@ -272,7 +326,8 @@ class ReceiverWakeActivity : ComponentActivity() {
                         }
                     }
                     deliveredResultState.value = result
-                    isReceivingState.value = false // Stop pulsing animation on delivery
+                    isReceivingState.value = false
+                    transport.resetProgress()
 
                     transport.sendControl(
                         senderEndpointId,
@@ -281,6 +336,8 @@ class ReceiverWakeActivity : ComponentActivity() {
                 } catch (e: Exception) {
                     android.util.Log.e("ReceiverWakeActivity", "Failed to process incoming file: ${e.message}", e)
                     isReceivingState.value = false
+                    errorMessageState.value = "Could not save file"
+                    transport.resetProgress()
                     transport.sendControl(
                         senderEndpointId,
                         ControlMessage.TransferComplete(
@@ -298,6 +355,8 @@ class ReceiverWakeActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        countdownJob?.cancel()
+        gestureJob?.cancel()
         gestureDetector?.stop()
         gestureDetector = null
     }
@@ -309,52 +368,58 @@ fun WakeScreenContent(
     fileName: String,
     sizeBytes: Long,
     remainingMs: Long,
+    totalWindowMs: Long,
     isReceiving: Boolean,
     progress: Float?,
     deliveredResult: PayloadSaver.SaveResult?,
+    errorMessage: String?,
+    gestureConfidence: Float,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
     val view = LocalView.current
+    val palette = LocalAirGrabPalette.current
 
-    LaunchedEffect(isReceiving) {
-        if (isReceiving) {
-            view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+    LaunchedEffect(isReceiving, deliveredResult) {
+        if (isReceiving || deliveredResult != null) {
+            runCatching { view.performHapticFeedback(HapticFeedbackConstants.CONFIRM) }
         }
     }
-
-    val auroraEmerald = Color(0xFF00FFA3)
-    val voidBackground = Color(0xFF050608)
-    val glassSurface = Color(0x0EFFFFFF)
-    val glassBorder = Color(0x22FFFFFF)
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(voidBackground)
+            .background(palette.canvas)
             .spatialAura(
-                color = auroraEmerald,
-                intensity = { if (isReceiving) 0.9f else 0.45f }
+                color = palette.accentReceiveAura,
+                maxAlpha = if (palette.isDark) 0.42f else 0.30f,
+                intensity = {
+                    when {
+                        gestureConfidence > 0.15f -> gestureConfidence
+                        isReceiving -> 0.55f
+                        else -> 0.28f
+                    }
+                }
             )
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(24.dp)
-                .systemBarsPadding(),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceBetween
+                .systemBarsPadding()
+                .displayCutoutPadding()
+                .padding(horizontal = 24.dp, vertical = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Top Bar: Sender Badge & Dismiss
+            // Top Bar: Sender Badge & 48dp Dismiss Button
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = glassSurface,
-                    border = androidx.compose.foundation.BorderStroke(1.dp, glassBorder)
+                    shape = CircleShape,
+                    color = palette.surfaceGlass,
+                    border = BorderStroke(1.dp, palette.borderHairline)
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
@@ -364,148 +429,160 @@ fun WakeScreenContent(
                             modifier = Modifier
                                 .size(8.dp)
                                 .clip(CircleShape)
-                                .background(auroraEmerald)
+                                .background(palette.accentReceive)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = senderName,
                             style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFFF5F5F7)
-                        )
-                    }
-                }
-
-                IconButton(onClick = onDismiss) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Dismiss",
-                        tint = Color(0xFF8E8E93)
-                    )
-                }
-            }
-
-            // Center: File Card & Drop Countdown Arc
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                // Circular Countdown Arc
-                val arcProgress = (remainingMs.toFloat() / 4000f).coerceIn(0f, 1f)
-                val animatedArc by animateFloatAsState(targetValue = arcProgress, label = "Arc")
-
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier.size(130.dp)
-                ) {
-                    CircularProgressIndicator(
-                        progress = { animatedArc },
-                        modifier = Modifier.fillMaxSize(),
-                        strokeWidth = 4.dp,
-                        color = auroraEmerald,
-                        trackColor = Color(0x1AFFFFFF)
-                    )
-
-                    Icon(
-                        imageVector = Icons.Default.PanTool,
-                        contentDescription = null,
-                        modifier = Modifier.size(52.dp),
-                        tint = auroraEmerald
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                Card(
-                    shape = RoundedCornerShape(28.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = glassSurface
-                    ),
-                    border = androidx.compose.foundation.BorderStroke(1.5.dp, auroraEmerald),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(20.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            text = fileName,
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.textPrimary,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-
-                        if (sizeBytes > 0) {
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = Formatter.formatFileSize(context, sizeBytes),
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(14.dp))
-
-                        if (deliveredResult != null) {
-                            Text(
-                                text = "DELIVERED",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = auroraEmerald
-                            )
-                        } else if (isReceiving) {
-                            val p = progress ?: 0f
-                            LinearProgressIndicator(
-                                progress = { p },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(4.dp)
-                                    .clip(CircleShape),
-                                color = auroraEmerald,
-                                trackColor = Color(0x1AFFFFFF)
-                            )
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Text(
-                                text = "Receiving: ${(p * 100).toInt()}%",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color(0xFFF5F5F7)
-                            )
-                        } else {
-                            Text(
-                                text = "Open palm to catch (${(remainingMs / 1000) + 1}s)",
-                                style = MaterialTheme.typography.labelLarge,
-                                fontWeight = FontWeight.SemiBold,
-                                color = auroraEmerald
-                            )
-                        }
                     }
+                }
+
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(palette.surfaceGlass)
+                        .border(1.dp, palette.borderHairline, CircleShape)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Dismiss incoming drop",
+                        tint = palette.textPrimary,
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
             }
 
-            // Bottom Action / Open in Gallery
-            if (deliveredResult != null && deliveredResult is PayloadSaver.SaveResult.MediaSaved) {
-                Button(
-                    onClick = {
-                        val intent = Intent(Intent.ACTION_VIEW).apply {
-                            setDataAndType(deliveredResult.uri, "image/*")
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            // Adaptive Scrollable Center Stage
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                contentAlignment = Alignment.Center
+            ) {
+                if (deliveredResult != null) {
+                    DeliveredCard(
+                        result = deliveredResult,
+                        palette = palette,
+                        onDone = onDismiss
+                    )
+                } else {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .widthIn(max = 440.dp)
+                            .fillMaxWidth()
+                    ) {
+                        val arcProgress = (remainingMs.toFloat() / totalWindowMs.toFloat()).coerceIn(0f, 1f)
+                        val animatedArc by animateFloatAsState(
+                            targetValue = arcProgress,
+                            animationSpec = if (palette.reduceMotion) snap() else AirGrabMotion.LayoutSettle,
+                            label = "WakeArc"
+                        )
+
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier.size(120.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                progress = { if (isReceiving) (progress ?: 0f) else animatedArc },
+                                modifier = Modifier.fillMaxSize(),
+                                strokeWidth = 4.dp,
+                                color = palette.accentReceive,
+                                trackColor = palette.surfaceSubtle
+                            )
+
+                            Icon(
+                                imageVector = Icons.Default.PanTool,
+                                contentDescription = null,
+                                modifier = Modifier.size(44.dp),
+                                tint = palette.accentReceive
+                            )
                         }
-                        context.startActivity(Intent.createChooser(intent, "Open in Gallery"))
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = auroraEmerald)
-                ) {
-                    Text("Open in Gallery", color = Color.Black, fontWeight = FontWeight.Bold)
+
+                        Spacer(modifier = Modifier.height(24.dp))
+
+                        Surface(
+                            shape = RoundedCornerShape(28.dp),
+                            color = palette.surfaceGlass,
+                            border = BorderStroke(1.5.dp, palette.accentReceive),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .semantics { liveRegion = LiveRegionMode.Polite }
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    text = fileName,
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = palette.textPrimary,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = TextAlign.Center
+                                )
+
+                                if (sizeBytes > 0) {
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        text = Formatter.formatFileSize(context, sizeBytes),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = palette.textSecondary,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.height(18.dp))
+
+                                if (errorMessage != null) {
+                                    Text(
+                                        text = errorMessage,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = palette.accentError,
+                                        fontWeight = FontWeight.Medium,
+                                        textAlign = TextAlign.Center
+                                    )
+                                } else if (isReceiving) {
+                                    val p = (progress ?: 0f).coerceIn(0f, 1f)
+                                    LinearProgressIndicator(
+                                        progress = { p },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(4.dp)
+                                            .clip(CircleShape),
+                                        color = palette.accentReceive,
+                                        trackColor = palette.surfaceSubtle
+                                    )
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Text(
+                                        text = "Receiving ${(p * 100).toInt()}%",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = palette.accentReceive,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                } else {
+                                    Text(
+                                        text = "Open palm to catch (${(remainingMs / 1000) + 1}s)",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = palette.accentReceive
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
-            } else {
-                Text(
-                    text = "Raise open palm toward phone to accept",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF8E8E93),
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(bottom = 8.dp)
-                )
             }
         }
     }

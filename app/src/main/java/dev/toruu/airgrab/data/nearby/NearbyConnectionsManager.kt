@@ -138,6 +138,8 @@ class NearbyConnectionsManager(
     private val peerNames = ConcurrentHashMap<String, String>()
 
     private var activeDeviceName: String = Build.MODEL
+    @Volatile
+    private var isRoomActive: Boolean = false
     private var isAdvertising: Boolean = false
     private var isDiscovering: Boolean = false
     private var isDiscoveryPaused: Boolean = false
@@ -175,6 +177,7 @@ class NearbyConnectionsManager(
                 }
                 Payload.Type.FILE -> {
                     Log.d(TAG, "Receiving FILE payload ${payload.id} from $endpointId (holding until SUCCESS)")
+                    _transferProgress.value = 0f
                     incomingPayloadMap[payload.id] = endpointId to payload
                 }
                 Payload.Type.STREAM -> {
@@ -283,7 +286,7 @@ class NearbyConnectionsManager(
                 // ourselves after a grace period instead of staying disconnected forever.
                 scope.launch {
                     delay(3_000)
-                    if (!_connectedPeers.value.containsKey(endpointId)) {
+                    if (isRoomActive && !_connectedPeers.value.containsKey(endpointId)) {
                         Log.d(TAG, "Peer did not dial, connecting ourselves")
                         requestConnectionWithRetry(endpointId)
                     }
@@ -304,6 +307,7 @@ class NearbyConnectionsManager(
 
     override fun startAutoRoom(deviceName: String) {
         if (deviceName.isNotBlank()) activeDeviceName = deviceName
+        isRoomActive = true
         isDiscoveryPaused = false
         startAdvertisingInternal()
         startDiscoveryInternal()
@@ -377,6 +381,7 @@ class NearbyConnectionsManager(
     }
 
     override fun stopRoom() {
+        isRoomActive = false
         try {
             connectionsClient.stopAdvertising()
             connectionsClient.stopDiscovery()
@@ -399,12 +404,24 @@ class NearbyConnectionsManager(
     }
 
     override fun cancelTransfer(payloadId: Long) {
+        incomingPayloadMap.remove(payloadId)
+        completedPayloadMap.remove(payloadId)
+        fileHeaderMap.remove(payloadId)
+        outgoingPayloadMap.remove(payloadId)
+        closeOutgoingDescriptor(payloadId)
+        _transferProgress.value = null
+        resumeDiscovery()
         connectionsClient.cancelPayload(payloadId)
             .addOnSuccessListener {
                 Log.d(TAG, "Cancelled payload $payloadId")
-                _transferProgress.value = null
-                resumeDiscovery()
             }
+            .addOnFailureListener { e ->
+                Log.w(TAG, "cancelPayload($payloadId) failed: ${e.message}")
+            }
+    }
+
+    override fun resetProgress() {
+        _transferProgress.value = null
     }
 
     override fun pauseDiscovery() {
@@ -471,6 +488,7 @@ class NearbyConnectionsManager(
         } ?: throw IOException("Cannot open ParcelFileDescriptor for URI: $uri")
 
         val payload = Payload.fromFile(pfd)
+        _transferProgress.value = 0f
         outgoingPayloadMap[payload.id] = endpointId
         outgoingFdMap[payload.id] = pfd
 
@@ -492,6 +510,7 @@ class NearbyConnectionsManager(
         } catch (e: Exception) {
             outgoingPayloadMap.remove(payload.id)
             closeOutgoingDescriptor(payload.id)
+            _transferProgress.value = null
             throw e
         }
     }
@@ -499,9 +518,14 @@ class NearbyConnectionsManager(
     override suspend fun sendBytes(endpointId: String, bytes: ByteArray): Long {
         val payload = Payload.fromBytes(bytes)
         outgoingPayloadMap[payload.id] = endpointId
-        connectionsClient.sendPayload(endpointId, payload).await()
-        Log.d(TAG, "Sent bytes payload ${payload.id} (${bytes.size} bytes) to $endpointId")
-        return payload.id
+        try {
+            connectionsClient.sendPayload(endpointId, payload).await()
+            Log.d(TAG, "Sent bytes payload ${payload.id} (${bytes.size} bytes) to $endpointId")
+            return payload.id
+        } catch (e: Exception) {
+            outgoingPayloadMap.remove(payload.id)
+            throw e
+        }
     }
 
     private fun emitCompletedFile(payloadId: Long) {

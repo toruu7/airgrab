@@ -1,23 +1,23 @@
 package dev.toruu.airgrab
 
 import android.content.Intent
+import android.graphics.Color as AndroidColor
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.*
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import dev.toruu.airgrab.ui.AirGrabViewModel
 import dev.toruu.airgrab.ui.AppMode
 import dev.toruu.airgrab.ui.components.PermissionGate
 import dev.toruu.airgrab.ui.screens.AirGrabSurface
+import dev.toruu.airgrab.ui.theme.AirGrabTheme
+import dev.toruu.airgrab.ui.theme.LocalAirGrabPalette
 
 class MainActivity : ComponentActivity() {
 
@@ -29,7 +29,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.auto(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.auto(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT)
+        )
 
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
@@ -87,37 +90,11 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun AirGrabMainNavigation(viewModel: AirGrabViewModel) {
+    val palette = LocalAirGrabPalette.current
     Surface(
         modifier = Modifier.fillMaxSize(),
-        color = Color(0xFF050608)
+        color = palette.canvas
     ) {
         AirGrabSurface(viewModel = viewModel)
     }
-}
-
-@Composable
-fun AirGrabTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    content: @Composable () -> Unit
-) {
-    val darkColorScheme = darkColorScheme(
-        primary = Color(0xFF00F0FF),
-        onPrimary = Color(0xFF050608),
-        primaryContainer = Color(0x1AFFFFFF),
-        onPrimaryContainer = Color(0xFFF5F5F7),
-        secondary = Color(0xFF00FFA3),
-        onSecondary = Color(0xFF050608),
-        background = Color(0xFF050608),
-        onBackground = Color(0xFFF5F5F7),
-        surface = Color(0xFF0B0C10),
-        onSurface = Color(0xFFF5F5F7),
-        surfaceVariant = Color(0x14FFFFFF),
-        onSurfaceVariant = Color(0xFF8E8E93)
-    )
-
-    MaterialTheme(
-        colorScheme = darkColorScheme,
-        typography = Typography(),
-        content = content
-    )
 }

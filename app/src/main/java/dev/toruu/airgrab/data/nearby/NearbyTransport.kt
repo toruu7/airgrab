@@ -40,6 +40,7 @@ interface NearbyTransport {
         sessionId: String = ""
     ): Long
     suspend fun sendBytes(endpointId: String, bytes: ByteArray): Long
+    fun resetProgress()
     fun pauseDiscovery()
     fun resumeDiscovery()
 }

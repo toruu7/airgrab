@@ -19,6 +19,7 @@ data class GestureFrameResult(
 interface GestureDetector {
     val gestures: StateFlow<GestureFrameResult>
     fun start(lifecycleOwner: LifecycleOwner, previewView: PreviewView? = null)
+    fun unbindCamera()
     fun stop()
     fun setPowerMode(active: Boolean) // 12 fps idle vs 30 fps active
 }

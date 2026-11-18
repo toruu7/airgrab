@@ -11,6 +11,7 @@ import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.framework.image.MPImage
@@ -40,38 +41,44 @@ class MediaPipeGestureDetector(
     override val gestures: StateFlow<GestureFrameResult> = _gestures.asStateFlow()
 
     private val frameRateController = FrameRateController(active = false)
+    private val recognizerLock = Any()
     private var gestureRecognizer: GestureRecognizer? = null
     private var cameraExecutor: ExecutorService? = null
     private var cameraProvider: ProcessCameraProvider? = null
+    @Volatile
+    private var activeSessionToken: Long = 0L
 
     init {
         initGestureRecognizer()
     }
 
     private fun initGestureRecognizer() {
-        try {
-            val baseOptions = BaseOptions.builder()
-                .setModelAssetPath(MODEL_NAME)
-                .build()
+        synchronized(recognizerLock) {
+            if (gestureRecognizer != null) return
+            try {
+                val baseOptions = BaseOptions.builder()
+                    .setModelAssetPath(MODEL_NAME)
+                    .build()
 
-            val options = GestureRecognizer.GestureRecognizerOptions.builder()
-                .setBaseOptions(baseOptions)
-                .setMinHandDetectionConfidence(0.5f)
-                .setMinTrackingConfidence(0.5f)
-                .setMinHandPresenceConfidence(0.5f)
-                .setRunningMode(RunningMode.LIVE_STREAM)
-                .setResultListener { result: GestureRecognizerResult, _: MPImage ->
-                    processGestureResult(result)
-                }
-                .setErrorListener { error: RuntimeException ->
-                    Log.e(TAG, "MediaPipe GestureRecognizer error", error)
-                }
-                .build()
+                val options = GestureRecognizer.GestureRecognizerOptions.builder()
+                    .setBaseOptions(baseOptions)
+                    .setMinHandDetectionConfidence(0.5f)
+                    .setMinTrackingConfidence(0.5f)
+                    .setMinHandPresenceConfidence(0.5f)
+                    .setRunningMode(RunningMode.LIVE_STREAM)
+                    .setResultListener { result: GestureRecognizerResult, _: MPImage ->
+                        processGestureResult(result)
+                    }
+                    .setErrorListener { error: RuntimeException ->
+                        Log.e(TAG, "MediaPipe GestureRecognizer error", error)
+                    }
+                    .build()
 
-            gestureRecognizer = GestureRecognizer.createFromOptions(context, options)
-            Log.d(TAG, "MediaPipe GestureRecognizer initialized successfully")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize GestureRecognizer: ${e.message}", e)
+                gestureRecognizer = GestureRecognizer.createFromOptions(context, options)
+                Log.d(TAG, "MediaPipe GestureRecognizer initialized successfully")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to initialize GestureRecognizer: ${e.message}", e)
+            }
         }
     }
 
@@ -109,12 +116,31 @@ class MediaPipeGestureDetector(
     }
 
     override fun start(lifecycleOwner: LifecycleOwner, previewView: PreviewView?) {
-        cameraExecutor = Executors.newSingleThreadExecutor()
+        if (lifecycleOwner.lifecycle.currentState == Lifecycle.State.DESTROYED) {
+            return
+        }
+
+        // Re-initialize MediaPipe if stop() was previously called (e.g. onPause -> onResume).
+        initGestureRecognizer()
+
+        // Never leak executors if start() is called multiple times across recompositions/resumes.
+        cameraExecutor?.shutdownNow()
+        val executor = Executors.newSingleThreadExecutor()
+        cameraExecutor = executor
+
+        val sessionToken = ++activeSessionToken
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
 
         cameraProviderFuture.addListener({
+            if (sessionToken != activeSessionToken ||
+                lifecycleOwner.lifecycle.currentState == Lifecycle.State.DESTROYED
+            ) {
+                return@addListener
+            }
+
             try {
-                cameraProvider = cameraProviderFuture.get()
+                val provider = cameraProviderFuture.get()
+                cameraProvider = provider
 
                 val resolutionSelector = ResolutionSelector.Builder()
                     .setResolutionStrategy(
@@ -131,10 +157,10 @@ class MediaPipeGestureDetector(
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                     .build()
 
-                imageAnalysis.setAnalyzer(cameraExecutor!!) { imageProxy ->
+                imageAnalysis.setAnalyzer(executor) { imageProxy ->
                     val frameTimeMs = SystemClock.uptimeMillis()
                     try {
-                        if (frameRateController.shouldProcessFrame(frameTimeMs) && gestureRecognizer != null) {
+                        if (sessionToken == activeSessionToken && frameRateController.shouldProcessFrame(frameTimeMs)) {
                             val rotationDegrees = imageProxy.imageInfo.rotationDegrees
                             val bitmap = imageProxy.toBitmap()
                             val mpImage = BitmapImageBuilder(bitmap).build()
@@ -143,7 +169,9 @@ class MediaPipeGestureDetector(
                                 .setRotationDegrees(rotationDegrees)
                                 .build()
 
-                            gestureRecognizer?.recognizeAsync(mpImage, imageProcessingOptions, frameTimeMs)
+                            synchronized(recognizerLock) {
+                                gestureRecognizer?.recognizeAsync(mpImage, imageProcessingOptions, frameTimeMs)
+                            }
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "Error in image analyzer: ${e.message}", e)
@@ -154,19 +182,19 @@ class MediaPipeGestureDetector(
 
                 val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
 
-                cameraProvider?.unbindAll()
+                provider.unbindAll()
 
                 if (previewView != null) {
                     val preview = Preview.Builder().build()
                     preview.setSurfaceProvider(previewView.surfaceProvider)
-                    cameraProvider?.bindToLifecycle(
+                    provider.bindToLifecycle(
                         lifecycleOwner,
                         cameraSelector,
                         preview,
                         imageAnalysis
                     )
                 } else {
-                    cameraProvider?.bindToLifecycle(
+                    provider.bindToLifecycle(
                         lifecycleOwner,
                         cameraSelector,
                         imageAnalysis
@@ -179,17 +207,30 @@ class MediaPipeGestureDetector(
         }, ContextCompat.getMainExecutor(context))
     }
 
-    override fun stop() {
+    override fun unbindCamera() {
+        activeSessionToken++
         try {
             cameraProvider?.unbindAll()
-            cameraExecutor?.shutdown()
+            cameraExecutor?.shutdownNow()
             cameraExecutor = null
-            gestureRecognizer?.close()
-            gestureRecognizer = null
             frameRateController.reset()
-            Log.d(TAG, "MediaPipeGestureDetector stopped")
+            _gestures.value = GestureFrameResult(HandGesture.NONE, 0f, SystemClock.uptimeMillis())
+            Log.d(TAG, "CameraX unbound safely (model retained)")
         } catch (e: Exception) {
-            Log.e(TAG, "Error stopping GestureDetector: ${e.message}", e)
+            Log.e(TAG, "Error unbinding CameraX: ${e.message}", e)
+        }
+    }
+
+    override fun stop() {
+        unbindCamera()
+        synchronized(recognizerLock) {
+            try {
+                gestureRecognizer?.close()
+                gestureRecognizer = null
+                Log.d(TAG, "MediaPipeGestureDetector stopped")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error stopping GestureDetector: ${e.message}", e)
+            }
         }
     }
 }

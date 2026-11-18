@@ -142,21 +142,24 @@ class PayloadResolver(private val context: Context) {
             ?: throw IllegalArgumentException("Invalid DocumentFile tree Uri: $treeUri")
 
         val folderName = rootDoc.name ?: "Folder_${System.currentTimeMillis()}"
-        val tempZipFile = File(context.cacheDir, "$folderName.zip")
+        val tempZipFile = File(context.cacheDir, "airgrab_tmp_${System.currentTimeMillis()}_$folderName.zip")
         if (tempZipFile.exists()) tempZipFile.delete()
 
         var totalBytes = 0L
         var fileCount = 0
+        val seenEntries = HashSet<String>()
 
         ZipOutputStream(FileOutputStream(tempZipFile)).use { zos ->
             fun zipDocument(doc: DocumentFile, currentPath: String) {
                 if (doc.isDirectory) {
                     val children = doc.listFiles()
+                    val dirName = doc.name ?: "dir"
                     for (child in children) {
-                        zipDocument(child, if (currentPath.isEmpty()) doc.name ?: "" else "$currentPath/${doc.name}")
+                        zipDocument(child, if (currentPath.isEmpty()) dirName else "$currentPath/$dirName")
                     }
                 } else if (doc.isFile) {
-                    val entryName = if (currentPath.isEmpty()) doc.name ?: "file" else "$currentPath/${doc.name}"
+                    val rawName = if (currentPath.isEmpty()) doc.name ?: "file" else "$currentPath/${doc.name ?: "file"}"
+                    val entryName = uniqueZipEntryName(rawName, seenEntries)
                     zos.putNextEntry(ZipEntry(entryName))
                     context.contentResolver.openInputStream(doc.uri)?.use { input ->
                         val buffer = ByteArray(8192)
@@ -187,11 +190,12 @@ class PayloadResolver(private val context: Context) {
     }
 
     private suspend fun archiveUrisToZip(uris: List<Uri>, archiveName: String): TransferPayload.FolderArchive = withContext(Dispatchers.IO) {
-        val tempZipFile = File(context.cacheDir, "$archiveName.zip")
+        val tempZipFile = File(context.cacheDir, "airgrab_tmp_${System.currentTimeMillis()}_$archiveName.zip")
         if (tempZipFile.exists()) tempZipFile.delete()
 
         var totalBytes = 0L
         var fileCount = 0
+        val seenEntries = HashSet<String>()
 
         ZipOutputStream(FileOutputStream(tempZipFile)).use { zos ->
             for ((index, uri) in uris.withIndex()) {
@@ -205,7 +209,8 @@ class PayloadResolver(private val context: Context) {
                     }
                 }
 
-                zos.putNextEntry(ZipEntry(fileName))
+                val entryName = uniqueZipEntryName(fileName, seenEntries)
+                zos.putNextEntry(ZipEntry(entryName))
                 context.contentResolver.openInputStream(uri)?.use { input ->
                     val buffer = ByteArray(8192)
                     var read: Int
@@ -227,5 +232,29 @@ class PayloadResolver(private val context: Context) {
             zipUri = tempZipFile.toUri(),
             fileCount = fileCount
         )
+    }
+
+    fun cleanupTempArchives() {
+        runCatching {
+            context.cacheDir.listFiles()?.forEach { file ->
+                if (file.name.startsWith("airgrab_tmp_") && file.name.endsWith(".zip")) {
+                    file.delete()
+                }
+            }
+        }
+    }
+
+    private fun uniqueZipEntryName(raw: String, seen: MutableSet<String>): String {
+        if (seen.add(raw)) return raw
+        val dir = raw.substringBeforeLast('/', "")
+        val file = raw.substringAfterLast('/')
+        val stem = file.substringBeforeLast('.', file)
+        val ext = file.substringAfterLast('.', "").let { if (it.isEmpty()) "" else ".$it" }
+        var counter = 1
+        while (true) {
+            val candidateFile = "$stem (${counter++})$ext"
+            val candidate = if (dir.isEmpty()) candidateFile else "$dir/$candidateFile"
+            if (seen.add(candidate)) return candidate
+        }
     }
 }

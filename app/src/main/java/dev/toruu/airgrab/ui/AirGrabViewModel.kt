@@ -47,8 +47,12 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
     private val payloadResolver = PayloadResolver(context)
     private val payloadSaver = PayloadSaver(context)
 
-    private val _appMode = MutableStateFlow(AppMode.HOME)
+    private val _appMode = MutableStateFlow(AppMode.ACTIVE)
     val appMode: StateFlow<AppMode> = _appMode.asStateFlow()
+
+    /** True while resolving or compressing a picked folder/URI before it is ready to grab. */
+    private val _isStaging = MutableStateFlow(false)
+    val isStaging: StateFlow<Boolean> = _isStaging.asStateFlow()
 
     /** Human readable status shown on the active screen (e.g. "no peer connected"). */
     private val _statusMessage = MutableStateFlow<String?>(null)
@@ -104,6 +108,7 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
     fun onAppForegroundChanged(foreground: Boolean) {
         app.isAppForeground = foreground
         if (!foreground) {
+            gestureDetector.unbindCamera()
             val state = stateMachine.receiverState.value
             if (state is ReceiverState.Armed || state is ReceiverState.Delivered) {
                 stateMachine.resetReceiverToListening()
@@ -123,11 +128,10 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
                 gestureDetector.setPowerMode(active = false)
             }
             AppMode.ACTIVE -> {
-                // Symmetric room: advertise + discover, so the other device is found no matter
-                // which one of us has something to send.
-                nearbyTransport.startAutoRoom(Build.MODEL)
+                if (dev.toruu.airgrab.ui.components.PermissionHelper.hasNearbyPermissions(context)) {
+                    nearbyTransport.startAutoRoom(Build.MODEL)
+                }
                 gestureDetector.setPowerMode(active = false)
-                // A stale delivered/armed state from a previous visit would hide the stage UI.
                 if (stateMachine.receiverState.value is ReceiverState.Delivered) {
                     stateMachine.resetReceiverToListening()
                 }
@@ -135,48 +139,82 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    fun dismissStatusMessage() {
+        _statusMessage.value = null
+    }
+
     fun handleIncomingIntent(intent: Intent) {
         viewModelScope.launch {
-            val payload = payloadResolver.resolveIntent(intent)
-            if (payload != null) {
-                stagePayload(payload)
-                setAppMode(AppMode.ACTIVE)
+            _isStaging.value = true
+            try {
+                val payload = payloadResolver.resolveIntent(intent)
+                if (payload != null) {
+                    stagePayload(payload)
+                    setAppMode(AppMode.ACTIVE)
+                } else {
+                    _statusMessage.value = "Could not read shared content"
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to resolve incoming intent: ${e.message}", e)
+                _statusMessage.value = "Unable to open shared item"
+            } finally {
+                _isStaging.value = false
             }
         }
     }
 
     fun stagePayload(payload: TransferPayload) {
         stateMachine.stagePayload(payload)
+        nearbyTransport.resetProgress()
         _statusMessage.value = null
     }
 
     fun stageUri(uri: Uri) {
         viewModelScope.launch {
-            val payload = payloadResolver.resolveUri(uri)
-            stagePayload(payload)
-            setAppMode(AppMode.ACTIVE)
+            _isStaging.value = true
+            try {
+                val payload = payloadResolver.resolveUri(uri)
+                stagePayload(payload)
+                setAppMode(AppMode.ACTIVE)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to stage URI: ${e.message}", e)
+                _statusMessage.value = "Could not stage selected file"
+            } finally {
+                _isStaging.value = false
+            }
         }
     }
 
     fun stageFolderTree(treeUri: Uri) {
         viewModelScope.launch {
-            val payload = payloadResolver.archiveFolderTree(treeUri)
-            stagePayload(payload)
-            setAppMode(AppMode.ACTIVE)
+            _isStaging.value = true
+            try {
+                val payload = payloadResolver.archiveFolderTree(treeUri)
+                stagePayload(payload)
+                setAppMode(AppMode.ACTIVE)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to archive folder: ${e.message}", e)
+                _statusMessage.value = "Could not package selected folder"
+            } finally {
+                _isStaging.value = false
+            }
         }
     }
 
     fun stageClipboard() {
-        val clip = payloadResolver.resolveClipboard()
+        val clip = runCatching { payloadResolver.resolveClipboard() }.getOrNull()
         if (clip != null) {
             stagePayload(clip)
             setAppMode(AppMode.ACTIVE)
+        } else {
+            _statusMessage.value = "Clipboard is empty"
         }
     }
 
     fun cancelTransfer() {
         activeTransferPayloadId?.let { nearbyTransport.cancelTransfer(it) }
         activeTransferPayloadId = null
+        nearbyTransport.resetProgress()
         stateMachine.resetSenderToStagedOrIdle()
         _statusMessage.value = null
     }
@@ -185,21 +223,28 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
     fun clearPayload() {
         activeTransferPayloadId?.let { nearbyTransport.cancelTransfer(it) }
         activeTransferPayloadId = null
+        nearbyTransport.resetProgress()
         stateMachine.unstagePayload()
+        payloadResolver.cleanupTempArchives()
         _statusMessage.value = null
     }
 
-    /**
-     * "Ready for next drop" in the receiver card.
-     *
-     * The old button just re-selected Receiver mode, which was already active and therefore did
-     * nothing - the state machine stayed in [ReceiverState.Delivered] forever.
-     */
+    fun resetSenderForNextSend() {
+        activeTransferPayloadId = null
+        nearbyTransport.resetProgress()
+        stateMachine.unstagePayload()
+        payloadResolver.cleanupTempArchives()
+        _statusMessage.value = null
+    }
+
     fun resetReceiverForNextDrop() {
+        nearbyTransport.resetProgress()
         stateMachine.resetReceiverToListening()
         hysteresis.resetState()
         _statusMessage.value = null
-        nearbyTransport.startAutoRoom(Build.MODEL)
+        if (dev.toruu.airgrab.ui.components.PermissionHelper.hasNearbyPermissions(context)) {
+            nearbyTransport.startAutoRoom(Build.MODEL)
+        }
     }
 
     private fun observeGestures() {
@@ -353,7 +398,14 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
                     }
                     is ControlMessage.TransferComplete -> {
                         if (_appMode.value == AppMode.ACTIVE) {
-                            stateMachine.onSenderTransferComplete()
+                            if (message.success) {
+                                stateMachine.onSenderTransferComplete()
+                                payloadResolver.cleanupTempArchives()
+                            } else {
+                                stateMachine.resetSenderToStagedOrIdle()
+                                _statusMessage.value = message.errorMessage ?: "Receiver could not save the file"
+                            }
+                            nearbyTransport.resetProgress()
                             hysteresis.startCooldown()
                         }
                     }
@@ -495,6 +547,7 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
 
                     Log.d(TAG, "Payload ${incoming.payloadId} saved: $result")
                     stateMachine.onReceiverDelivered(result)
+                    nearbyTransport.resetProgress()
                     hysteresis.startCooldown()
                     gestureDetector.setPowerMode(active = false)
 
@@ -505,6 +558,8 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
                 } catch (e: Exception) {
                     Log.e(TAG, "Error saving received file: ${e.message}", e)
                     stateMachine.resetReceiverToListening()
+                    nearbyTransport.resetProgress()
+                    _statusMessage.value = "Could not save incoming file"
                     hysteresis.startCooldown()
                     gestureDetector.setPowerMode(active = false)
                     nearbyTransport.sendControl(
@@ -530,6 +585,8 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
                 activeTransferPayloadId = null
                 if (_appMode.value == AppMode.ACTIVE) {
                     stateMachine.onSenderTransferComplete()
+                    nearbyTransport.resetProgress()
+                    payloadResolver.cleanupTempArchives()
                     hysteresis.startCooldown()
                 }
             }
@@ -545,10 +602,13 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
                 }
                 if (senderState.value is SenderState.Transferring) {
                     stateMachine.resetSenderToStagedOrIdle()
+                    _statusMessage.value = "Transfer interrupted — try grabbing again"
                 }
                 if (receiverState.value is ReceiverState.Receiving) {
                     stateMachine.resetReceiverToListening()
+                    _statusMessage.value = "Incoming transfer interrupted"
                 }
+                nearbyTransport.resetProgress()
                 hysteresis.startCooldown()
             }
         }
@@ -585,6 +645,7 @@ class AirGrabViewModel(application: Application) : AndroidViewModel(application)
         super.onCleared()
         ttlJob?.cancel()
         gestureDetector.stop()
+        payloadResolver.cleanupTempArchives()
         // Keep the room alive while the ambient wake service still needs it.
         if (!AirGrabDiscoveryService.isServiceRunning) {
             nearbyTransport.stopRoom()

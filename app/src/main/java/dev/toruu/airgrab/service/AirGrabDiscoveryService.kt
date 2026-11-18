@@ -18,6 +18,7 @@ import dev.toruu.airgrab.data.nearby.ControlMessage
 import dev.toruu.airgrab.data.nearby.NearbyConnectionsManager
 import dev.toruu.airgrab.domain.GrabDropStateMachine
 import dev.toruu.airgrab.ui.ReceiverWakeActivity
+import dev.toruu.airgrab.ui.components.PermissionHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -68,14 +69,25 @@ class AirGrabDiscoveryService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        if (!PermissionHelper.hasNearbyPermissions(this)) {
+            Log.w(TAG, "Nearby/Bluetooth permissions not granted; cannot start connectedDevice service")
+            stopSelf()
+            return
+        }
         isServiceRunning = true
         createNotificationChannels()
 
         // Share the single process-wide transport (Nearby keeps one client per app).
         nearbyTransport = AirGrabApp.from(this).transport
 
-        startServiceForeground()
-        listenForGrabSignals()
+        try {
+            startServiceForeground()
+            listenForGrabSignals()
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SecurityException starting foreground service: ${e.message}", e)
+            isServiceRunning = false
+            stopSelf()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

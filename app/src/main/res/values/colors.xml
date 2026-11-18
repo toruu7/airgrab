@@ -1,6 +1,6 @@
 <resources>
-    <color name="primary">#6750A4</color>
-    <color name="primary_container">#EADDFF</color>
-    <color name="background">#141218</color>
-    <color name="surface">#1D1B20</color>
+    <color name="primary">#0077B6</color>
+    <color name="primary_container">#D6F0FF</color>
+    <color name="background">#F4F6FA</color>
+    <color name="surface">#FFFFFF</color>
 </resources>
