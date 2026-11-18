@@ -35,14 +35,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
+import dev.toruu.airgrab.AirGrabApp
 import dev.toruu.airgrab.data.nearby.ControlMessage
+import dev.toruu.airgrab.data.nearby.NearbyConnectionsManager
 import dev.toruu.airgrab.data.payload.PayloadSaver
 import dev.toruu.airgrab.data.vision.HandGesture
 import dev.toruu.airgrab.data.vision.MediaPipeGestureDetector
 import dev.toruu.airgrab.domain.GestureEvent
 import dev.toruu.airgrab.domain.GestureHysteresis
-import dev.toruu.airgrab.service.AirGrabDiscoveryService
 import dev.toruu.airgrab.ui.components.RadialGlowOverlay
+import dev.toruu.airgrab.ui.components.spatialAura
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -60,12 +62,17 @@ class ReceiverWakeActivity : ComponentActivity() {
         const val EXTRA_SIZE_BYTES = "extra_size_bytes"
         const val EXTRA_EXPIRES_AT = "extra_expires_at"
 
-        private const val ACTIVE_DROP_WINDOW_MS = 4000L
+        // The countdown starts when the screen appears, so leave time for the camera to warm up
+        // and for the user to react. The sender keeps the session alive for 15s.
+        private const val ACTIVE_DROP_WINDOW_MS = 12_000L
     }
 
     private var gestureDetector: MediaPipeGestureDetector? = null
     private val hysteresis = GestureHysteresis()
     private lateinit var payloadSaver: PayloadSaver
+
+    private val transport by lazy { AirGrabApp.from(this).transport }
+    private val deviceId by lazy { AirGrabApp.from(this).deviceId }
 
     private var sessionId: String = ""
     private var senderEndpointId: String = ""
@@ -95,6 +102,12 @@ class ReceiverWakeActivity : ComponentActivity() {
         fileName = intent.getStringExtra(EXTRA_FILE_NAME) ?: "Shared Item"
         mimeType = intent.getStringExtra(EXTRA_MIME_TYPE) ?: "application/octet-stream"
         sizeBytes = intent.getLongExtra(EXTRA_SIZE_BYTES, 0L)
+
+        // The in-app unified screen already owns this session - do not duplicate the drop UI.
+        if (AirGrabApp.from(this).activeReceiverSessionId == sessionId) {
+            finish()
+            return
+        }
 
         gestureDetector = MediaPipeGestureDetector(applicationContext)
 
@@ -183,30 +196,35 @@ class ReceiverWakeActivity : ComponentActivity() {
         isReceivingState.value = true
         countdownJob?.cancel()
 
-        val sharedManager = AirGrabDiscoveryService.sharedNearbyManager
-        if (sharedManager != null) {
-            lifecycleScope.launch {
-                val myEndpointId = sharedManager.connectedPeers.value.keys.firstOrNull() ?: "local-receiver"
-                val acceptDrop = ControlMessage.AcceptDrop(
-                    sessionId = sessionId,
-                    receiverEndpointId = myEndpointId
-                )
-                sharedManager.sendControl(senderEndpointId, acceptDrop)
-            }
+        lifecycleScope.launch {
+            val acceptDrop = ControlMessage.AcceptDrop(
+                sessionId = sessionId,
+                receiverEndpointId = deviceId
+            )
+            transport.sendControl(senderEndpointId, acceptDrop)
         }
     }
 
     private fun observeControlMessages() {
-        val sharedManager = AirGrabDiscoveryService.sharedNearbyManager ?: return
         lifecycleScope.launch {
-            sharedManager.incomingControl.collectLatest { (_, message) ->
+            transport.incomingControl.collectLatest { (_, message) ->
                 when (message) {
                     is ControlMessage.SessionClaimed -> {
-                        val myEndpointId = sharedManager.connectedPeers.value.keys.firstOrNull() ?: ""
-                        if (message.sessionId == sessionId && message.claimedByEndpointId != myEndpointId) {
-                            // Another peer claimed drop
+                        if (message.sessionId == sessionId && message.claimedByEndpointId != deviceId) {
+                            // Another peer claimed the drop
                             finish()
                         }
+                    }
+                    is ControlMessage.TextContent -> {
+                        if (message.sessionId != sessionId) return@collectLatest
+                        val result = payloadSaver.saveTextToClipboard(message.text, message.isUrl)
+                        deliveredResultState.value = result
+                        isReceivingState.value = false
+                        hysteresis.startCooldown()
+                        transport.sendControl(
+                            senderEndpointId,
+                            ControlMessage.TransferComplete(sessionId = sessionId, success = true)
+                        )
                     }
                     is ControlMessage.TransferComplete -> {
                         if (message.sessionId == sessionId) {
@@ -220,40 +238,59 @@ class ReceiverWakeActivity : ComponentActivity() {
     }
 
     private fun observeIncomingPayloads() {
-        val sharedManager = AirGrabDiscoveryService.sharedNearbyManager ?: return
         lifecycleScope.launch {
-            sharedManager.transferProgress.collectLatest { prog ->
+            transport.transferProgress.collectLatest { prog ->
                 transferProgressState.value = prog
             }
         }
 
         lifecycleScope.launch {
-            sharedManager.incomingFiles.collectLatest { incoming ->
+            transport.incomingFiles.collectLatest { incoming ->
+                // Only handle the session this activity accepted; the in-app receiver shares
+                // the same transport and would otherwise save the file twice.
+                if (sessionId.isNotBlank() && incoming.sessionId.isNotBlank() && incoming.sessionId != sessionId) {
+                    android.util.Log.w("ReceiverWakeActivity", "Ignoring payload for another session")
+                    return@collectLatest
+                }
                 try {
-                    val inputStream = dev.toruu.airgrab.data.nearby.NearbyConnectionsManager.openPayloadInputStream(
+                    val inputStream = NearbyConnectionsManager.openPayloadInputStream(
                         applicationContext,
                         incoming.payload
-                    )
-                    if (inputStream != null) {
-                        val result = inputStream.use { stream ->
-                            if (mimeType.startsWith("image/") || mimeType.startsWith("video/")) {
-                                payloadSaver.saveMedia(fileName, mimeType, stream)
-                            } else if (fileName.endsWith(".zip")) {
-                                payloadSaver.saveAndExtractZip(fileName, stream)
-                            } else {
-                                payloadSaver.saveDocumentOrBinary(fileName, stream)
-                            }
-                        }
-                        deliveredResultState.value = result
-                        isReceivingState.value = false // Stop pulsing animation on delivery
+                    ) ?: throw IllegalStateException("Cannot open stream for payload ${incoming.payloadId}")
 
-                        sharedManager.sendControl(
-                            senderEndpointId,
-                            ControlMessage.TransferComplete(sessionId = sessionId, success = true)
-                        )
+                    val name = incoming.fileName.takeIf { it.isNotBlank() } ?: fileName
+                    val mime = incoming.mimeType.takeIf { it.isNotBlank() } ?: mimeType
+                    val kind = incoming.transferKind.takeIf { it.isNotBlank() }
+
+                    val result = inputStream.use { stream ->
+                        when {
+                            kind == "FOLDER_ZIP" || name.endsWith(".zip", ignoreCase = true) ->
+                                payloadSaver.saveAndExtractZip(name, stream)
+                            kind == "MEDIA" || mime.startsWith("image/") || mime.startsWith("video/") ->
+                                payloadSaver.saveMedia(name, mime, stream)
+                            else -> payloadSaver.saveDocumentOrBinary(name, mime, stream)
+                        }
                     }
+                    deliveredResultState.value = result
+                    isReceivingState.value = false // Stop pulsing animation on delivery
+
+                    transport.sendControl(
+                        senderEndpointId,
+                        ControlMessage.TransferComplete(sessionId = sessionId, success = true)
+                    )
                 } catch (e: Exception) {
                     android.util.Log.e("ReceiverWakeActivity", "Failed to process incoming file: ${e.message}", e)
+                    isReceivingState.value = false
+                    transport.sendControl(
+                        senderEndpointId,
+                        ControlMessage.TransferComplete(
+                            sessionId = sessionId,
+                            success = false,
+                            errorMessage = e.message
+                        )
+                    )
+                } finally {
+                    NearbyConnectionsManager.deleteReceivedPayload(applicationContext, incoming.payload)
                 }
             }
         }
@@ -286,16 +323,20 @@ fun WakeScreenContent(
         }
     }
 
+    val auroraEmerald = Color(0xFF00FFA3)
+    val voidBackground = Color(0xFF050608)
+    val glassSurface = Color(0x0EFFFFFF)
+    val glassBorder = Color(0x22FFFFFF)
+
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF141218))
+            .background(voidBackground)
+            .spatialAura(
+                color = auroraEmerald,
+                intensity = { if (isReceiving) 0.9f else 0.45f }
+            )
     ) {
-        RadialGlowOverlay(
-            isActive = isReceiving,
-            glowColor = MaterialTheme.colorScheme.primary
-        )
-
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -312,24 +353,25 @@ fun WakeScreenContent(
             ) {
                 Surface(
                     shape = RoundedCornerShape(16.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer
+                    color = glassSurface,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, glassBorder)
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.PhoneAndroid,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                            modifier = Modifier.size(18.dp)
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(auroraEmerald)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = senderName,
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                            color = Color(0xFFF5F5F7)
                         )
                     }
                 }
@@ -338,7 +380,7 @@ fun WakeScreenContent(
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "Dismiss",
-                        tint = MaterialTheme.colorScheme.onBackground
+                        tint = Color(0xFF8E8E93)
                     )
                 }
             }
@@ -354,31 +396,32 @@ fun WakeScreenContent(
 
                 Box(
                     contentAlignment = Alignment.Center,
-                    modifier = Modifier.size(140.dp)
+                    modifier = Modifier.size(130.dp)
                 ) {
                     CircularProgressIndicator(
                         progress = { animatedArc },
                         modifier = Modifier.fillMaxSize(),
-                        strokeWidth = 6.dp,
-                        color = MaterialTheme.colorScheme.primary,
-                        trackColor = MaterialTheme.colorScheme.surfaceVariant
+                        strokeWidth = 4.dp,
+                        color = auroraEmerald,
+                        trackColor = Color(0x1AFFFFFF)
                     )
 
                     Icon(
                         imageVector = Icons.Default.PanTool,
                         contentDescription = null,
-                        modifier = Modifier.size(56.dp),
-                        tint = MaterialTheme.colorScheme.primary
+                        modifier = Modifier.size(52.dp),
+                        tint = auroraEmerald
                     )
                 }
 
                 Spacer(modifier = Modifier.height(24.dp))
 
                 Card(
-                    shape = RoundedCornerShape(24.dp),
+                    shape = RoundedCornerShape(28.dp),
                     colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                        containerColor = glassSurface
                     ),
+                    border = androidx.compose.foundation.BorderStroke(1.5.dp, auroraEmerald),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(
@@ -406,10 +449,10 @@ fun WakeScreenContent(
 
                         if (deliveredResult != null) {
                             Text(
-                                text = "TRANSFER COMPLETE!",
+                                text = "DELIVERED",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
+                                color = auroraEmerald
                             )
                         } else if (isReceiving) {
                             val p = progress ?: 0f
@@ -417,73 +460,52 @@ fun WakeScreenContent(
                                 progress = { p },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(8.dp)
-                                    .clip(CircleShape)
+                                    .height(4.dp)
+                                    .clip(CircleShape),
+                                color = auroraEmerald,
+                                trackColor = Color(0x1AFFFFFF)
                             )
-                            Spacer(modifier = Modifier.height(8.dp))
+                            Spacer(modifier = Modifier.height(10.dp))
                             Text(
                                 text = "Receiving: ${(p * 100).toInt()}%",
-                                style = MaterialTheme.typography.bodySmall
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFFF5F5F7)
                             )
                         } else {
                             Text(
-                                text = "OPEN PALM TO CATCH (${(remainingMs / 1000) + 1}s)",
+                                text = "Open palm to catch (${(remainingMs / 1000) + 1}s)",
                                 style = MaterialTheme.typography.labelLarge,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
+                                fontWeight = FontWeight.SemiBold,
+                                color = auroraEmerald
                             )
                         }
                     }
                 }
             }
 
-            // Bottom: Touchless Catch Guidance (Headless Camera - No Video Feed)
-            Card(
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
+            // Bottom Action / Open in Gallery
+            if (deliveredResult != null && deliveredResult is PayloadSaver.SaveResult.MediaSaved) {
+                Button(
+                    onClick = {
+                        val intent = Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(deliveredResult.uri, "image/*")
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        context.startActivity(Intent.createChooser(intent, "Open in Gallery"))
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = auroraEmerald)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primaryContainer),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.PanTool,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(16.dp))
-
-                    Column(verticalArrangement = Arrangement.Center) {
-                        Text(
-                            text = "Touchless Catch Active",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = "Raise an open palm toward phone to drop payload.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                    Text("Open in Gallery", color = Color.Black, fontWeight = FontWeight.Bold)
                 }
+            } else {
+                Text(
+                    text = "Raise open palm toward phone to accept",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF8E8E93),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
             }
         }
     }

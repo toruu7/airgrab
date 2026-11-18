@@ -10,44 +10,97 @@ import com.google.android.gms.nearby.connection.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import java.io.IOException
+import java.io.InputStream
+import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * Single Nearby Connections transport for the whole process.
+ *
+ * Nearby caches one client per application context, so every part of the app (activity
+ * ViewModel, ambient discovery service, wake activity) MUST share this instance. Creating a
+ * second manager in the same process makes the two instances overwrite each other's
+ * advertising / discovery callbacks and payload callbacks.
+ *
+ * The room is symmetric: every device advertises *and* discovers, so there are no sender or
+ * receiver roles. Whoever has something to send grabs it; whoever shows a palm receives it.
+ */
 class NearbyConnectionsManager(
-    private val context: Context
+    private val context: Context,
+    private val localDeviceId: String
 ) : NearbyTransport {
 
     companion object {
         private const val TAG = "AirGrab_Nearby"
         const val SERVICE_ID = "dev.toruu.airgrab.OPEN_ROOM_V1"
-        val STRATEGY: Strategy = Strategy.P2P_STAR
 
-        fun openPayloadInputStream(context: Context, payload: Payload): java.io.InputStream? {
+        /**
+         * Symmetric room: every device advertises and discovers, so the topology is a mesh
+         * rather than a star. P2P_STAR forbids a non-hub device from also accepting incoming
+         * connections, which breaks when both phones dial.
+         */
+        val STRATEGY: Strategy = Strategy.P2P_CLUSTER
+
+        /**
+         * Opens the bytes of a *received* FILE payload.
+         *
+         * On Android 10+ received files must be read through the content URI exposed by
+         * [Payload.File.asUri]; [Payload.File.asParcelFileDescriptor] throws for payloads that
+         * span multiple files (large transfers), and [Payload.File.asJavaFile] is null.
+         */
+        fun openPayloadInputStream(context: Context, payload: Payload): InputStream? {
+            val file = try {
+                payload.asFile()
+            } catch (e: Exception) {
+                Log.e(TAG, "Payload is not a file payload: ${e.message}", e)
+                return null
+            } ?: return null
+
+            // 1. Scoped storage (Android 10+): read through the exposed content URI.
             try {
-                val file = payload.asFile() ?: return null
-
-                // 1. Modern Android 10+ / Scoped Storage: ParcelFileDescriptor
-                val pfd = file.asParcelFileDescriptor()
-                if (pfd != null) {
-                    return ParcelFileDescriptor.AutoCloseInputStream(pfd)
-                }
-
-                // 2. Direct File access
-                val javaFile = file.asJavaFile()
-                if (javaFile != null && javaFile.exists() && javaFile.length() > 0) {
-                    return java.io.FileInputStream(javaFile)
-                }
-
-                // 3. Content URI
                 val uri = file.asUri()
                 if (uri != null) {
-                    return context.contentResolver.openInputStream(uri)
+                    val stream = context.contentResolver.openInputStream(uri)
+                    if (stream != null) return stream
                 }
+            } catch (e: Exception) {
+                Log.w(TAG, "URI access failed, trying legacy file access: ${e.message}")
+            }
+
+            // 2. Pre-Q devices expose a plain File.
+            try {
+                val javaFile = file.asJavaFile()
+                if (javaFile != null && javaFile.exists()) {
+                    return java.io.FileInputStream(javaFile)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Direct file access failed: ${e.message}")
+            }
+
+            // 3. Last resort: a seekable descriptor, if the payload provides one. This throws
+            //    for payloads that span multiple files (very large transfers).
+            try {
+                val pfd = file.asParcelFileDescriptor()
+                return ParcelFileDescriptor.AutoCloseInputStream(pfd)
             } catch (e: Exception) {
                 Log.e(TAG, "Error opening payload input stream: ${e.message}", e)
             }
             return null
+        }
+
+        /** Removes Nearby's temporary copy of a received FILE payload (call after copying it). */
+        fun deleteReceivedPayload(context: Context, payload: Payload) {
+            try {
+                val file = payload.asFile() ?: return
+                val uri = file.asUri() ?: return
+                context.contentResolver.delete(uri, null, null)
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not delete temporary payload copy: ${e.message}")
+            }
         }
     }
 
@@ -66,14 +119,41 @@ class NearbyConnectionsManager(
     private val _outgoingComplete = MutableSharedFlow<Pair<Long, String>>(extraBufferCapacity = 32)
     override val outgoingComplete: SharedFlow<Pair<Long, String>> = _outgoingComplete.asSharedFlow()
 
+    private val _transferFailed = MutableSharedFlow<Long>(extraBufferCapacity = 32)
+    override val transferFailed: SharedFlow<Long> = _transferFailed.asSharedFlow()
+
     private val _transferProgress = MutableStateFlow<Float?>(null)
     override val transferProgress: StateFlow<Float?> = _transferProgress.asStateFlow()
 
-    private val incomingPayloadMap = java.util.concurrent.ConcurrentHashMap<Long, Pair<String, Payload>>()
-    private val outgoingPayloadMap = java.util.concurrent.ConcurrentHashMap<Long, String>()
+    /** In-flight incoming FILE payloads (payload received, transfer not finished yet). */
+    private val incomingPayloadMap = ConcurrentHashMap<Long, Pair<String, Payload>>()
+    /** Incoming FILE payloads whose transfer finished before their FileHeader arrived. */
+    private val completedPayloadMap = ConcurrentHashMap<Long, Pair<String, Payload>>()
+    /** FileHeader messages keyed by payload id (BYTES/FILE ordering is not guaranteed). */
+    private val fileHeaderMap = ConcurrentHashMap<Long, ControlMessage.FileHeader>()
+
+    private val outgoingPayloadMap = ConcurrentHashMap<Long, String>()
+    private val outgoingFdMap = ConcurrentHashMap<Long, ParcelFileDescriptor>()
+
+    private val peerNames = ConcurrentHashMap<String, String>()
 
     private var activeDeviceName: String = Build.MODEL
-    private var isHosting: Boolean = false
+    private var isAdvertising: Boolean = false
+    private var isDiscovering: Boolean = false
+    private var isDiscoveryPaused: Boolean = false
+
+    /**
+     * Name used for advertising. The suffix is a stable per-install discriminator so that two
+     * phones which discover each other can deterministically decide who dials; without it both
+     * devices would open a connection at the same time and one would fail.
+     */
+    private val advertisedName: String
+        get() = "$activeDeviceName#${localDeviceId.replace("-", "").take(8)}"
+
+    private fun displayName(raw: String): String {
+        val hash = raw.lastIndexOf('#')
+        return if (hash > 0) raw.substring(0, hash) else raw
+    }
 
     private val payloadCallback = object : PayloadCallback() {
         override fun onPayloadReceived(endpointId: String, payload: Payload) {
@@ -81,15 +161,20 @@ class NearbyConnectionsManager(
                 Payload.Type.BYTES -> {
                     val bytes = payload.asBytes() ?: return
                     val controlMsg = ControlMessageSerializer.decode(bytes)
-                    if (controlMsg != null) {
+                    if (controlMsg == null) {
+                        Log.w(TAG, "Dropping undecodable BYTES payload from $endpointId (${bytes.size} bytes)")
+                        return
+                    }
+                    if (controlMsg is ControlMessage.FileHeader) {
+                        fileHeaderMap[controlMsg.payloadId] = controlMsg
+                        emitCompletedFile(controlMsg.payloadId)
+                    } else {
                         Log.d(TAG, "Received control msg from $endpointId: $controlMsg")
-                        scope.launch {
-                            _incomingControl.emit(endpointId to controlMsg)
-                        }
+                        scope.launch { _incomingControl.emit(endpointId to controlMsg) }
                     }
                 }
                 Payload.Type.FILE -> {
-                    Log.d(TAG, "Starting to receive FILE payload ${payload.id} from $endpointId (holding until SUCCESS)")
+                    Log.d(TAG, "Receiving FILE payload ${payload.id} from $endpointId (holding until SUCCESS)")
                     incomingPayloadMap[payload.id] = endpointId to payload
                 }
                 Payload.Type.STREAM -> {
@@ -122,31 +207,31 @@ class NearbyConnectionsManager(
                     _transferProgress.value = 1f
                     resumeDiscovery()
 
-                    // Check if this was an incoming file payload
+                    // Incoming file: keep it until the metadata header is also available.
                     val incoming = incomingPayloadMap.remove(update.payloadId)
                     if (incoming != null) {
-                        Log.d(TAG, "Emitting fully-downloaded FILE payload ${update.payloadId} from ${incoming.first}")
-                        scope.launch {
-                            _incomingFiles.emit(IncomingFilePayload(update.payloadId, incoming.first, incoming.second))
-                        }
+                        completedPayloadMap[update.payloadId] = incoming
+                        emitCompletedFile(update.payloadId)
                     }
 
-                    // Check if this was an outgoing upload
+                    // Outgoing upload finished: release the descriptor we opened for sending.
                     val outgoingTarget = outgoingPayloadMap.remove(update.payloadId)
                     if (outgoingTarget != null) {
-                        Log.d(TAG, "Emitting outgoing upload completion for ${update.payloadId} to $outgoingTarget")
-                        scope.launch {
-                            _outgoingComplete.emit(update.payloadId to outgoingTarget)
-                        }
+                        closeOutgoingDescriptor(update.payloadId)
+                        Log.d(TAG, "Outgoing upload complete for ${update.payloadId} to $outgoingTarget")
+                        scope.launch { _outgoingComplete.emit(update.payloadId to outgoingTarget) }
                     }
                 }
                 PayloadTransferUpdate.Status.FAILURE,
                 PayloadTransferUpdate.Status.CANCELED -> {
-                    Log.w(TAG, "Payload ${update.payloadId} transfer failed/cancelled (${update.status})")
+                    Log.w(TAG, "Payload ${update.payloadId} transfer failed (${update.status})")
                     incomingPayloadMap.remove(update.payloadId)
+                    fileHeaderMap.remove(update.payloadId)
                     outgoingPayloadMap.remove(update.payloadId)
+                    closeOutgoingDescriptor(update.payloadId)
                     _transferProgress.value = null
                     resumeDiscovery()
+                    scope.launch { _transferFailed.emit(update.payloadId) }
                 }
             }
         }
@@ -155,6 +240,7 @@ class NearbyConnectionsManager(
     private val connectionLifecycleCallback = object : ConnectionLifecycleCallback() {
         override fun onConnectionInitiated(endpointId: String, info: ConnectionInfo) {
             Log.d(TAG, "Connection initiated from ${info.endpointName} ($endpointId), auto-accepting...")
+            peerNames[endpointId] = displayName(info.endpointName)
             // Immediate PIN-free acceptance for open-room pairing
             connectionsClient.acceptConnection(endpointId, payloadCallback)
                 .addOnFailureListener { e ->
@@ -165,10 +251,8 @@ class NearbyConnectionsManager(
         override fun onConnectionResult(endpointId: String, resolution: ConnectionResolution) {
             if (resolution.status.isSuccess) {
                 Log.d(TAG, "Connected to endpoint: $endpointId")
-                // Store endpoint mapping
-                _connectedPeers.update { current ->
-                    current + (endpointId to (current[endpointId] ?: "Peer-$endpointId"))
-                }
+                val name = peerNames[endpointId] ?: "Peer-$endpointId"
+                _connectedPeers.update { it + (endpointId to name) }
             } else {
                 Log.w(TAG, "Connection result failed for $endpointId: ${resolution.status.statusCode}")
                 _connectedPeers.update { it - endpointId }
@@ -177,64 +261,117 @@ class NearbyConnectionsManager(
 
         override fun onDisconnected(endpointId: String) {
             Log.d(TAG, "Endpoint disconnected: $endpointId")
+            peerNames.remove(endpointId)
             _connectedPeers.update { it - endpointId }
         }
     }
 
     private val endpointDiscoveryCallback = object : EndpointDiscoveryCallback() {
         override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
+            // NOTE: do not add to connectedPeers here - a discovered endpoint is not a
+            // connected endpoint yet, and sending to it fails with STATUS_ENDPOINT_UNKNOWN.
+            peerNames[endpointId] = displayName(info.endpointName)
+
+            // Symmetric room: both sides advertise and discover. Only the device with the
+            // lexicographically smaller advertised name dials, so exactly one connection is
+            // opened per pair instead of two racing ones. Peers without the "#id" suffix are
+            // older builds that only advertise, so we always dial them.
+            val peerIsLegacy = !info.endpointName.contains('#')
+            if (!peerIsLegacy && advertisedName > info.endpointName) {
+                Log.d(TAG, "Discovered ${info.endpointName}; it will dial us")
+                // Safety net: if the other side never dials (transient Nearby failure), dial
+                // ourselves after a grace period instead of staying disconnected forever.
+                scope.launch {
+                    delay(3_000)
+                    if (!_connectedPeers.value.containsKey(endpointId)) {
+                        Log.d(TAG, "Peer did not dial, connecting ourselves")
+                        requestConnectionWithRetry(endpointId)
+                    }
+                }
+                return
+            }
+
             Log.d(TAG, "Discovered endpoint: ${info.endpointName} ($endpointId), requesting connection...")
-            _connectedPeers.update { current ->
-                current + (endpointId to info.endpointName)
-            }
-            connectionsClient.requestConnection(
-                activeDeviceName,
-                endpointId,
-                connectionLifecycleCallback
-            ).addOnFailureListener { e ->
-                Log.e(TAG, "Request connection failed to $endpointId: ${e.message}", e)
-            }
+            requestConnectionWithRetry(endpointId)
         }
 
         override fun onEndpointLost(endpointId: String) {
-            Log.d(TAG, "Discovered endpoint lost: $endpointId")
-            _connectedPeers.update { it - endpointId }
+            // Discovery is paused during every transfer, which drops endpoints from discovery
+            // even though the connection stays alive. Only onDisconnected may remove a peer.
+            Log.d(TAG, "Endpoint lost from discovery (connection unaffected): $endpointId")
         }
     }
 
-    override fun startOpenRoom(deviceName: String, isHost: Boolean) {
-        this.activeDeviceName = if (deviceName.isNotBlank()) deviceName else Build.MODEL
-        this.isHosting = isHost
-        stopRoom()
+    override fun startAutoRoom(deviceName: String) {
+        if (deviceName.isNotBlank()) activeDeviceName = deviceName
+        isDiscoveryPaused = false
+        startAdvertisingInternal()
+        startDiscoveryInternal()
+    }
 
-        if (isHost) {
-            val advertisingOptions = AdvertisingOptions.Builder()
-                .setStrategy(STRATEGY)
-                .build()
+    private fun startAdvertisingInternal() {
+        if (isAdvertising) {
+            Log.d(TAG, "Already advertising as $advertisedName")
+            return
+        }
+        // Set optimistically so two callers (service + activity) cannot both start it.
+        isAdvertising = true
+        val advertisingOptions = AdvertisingOptions.Builder()
+            .setStrategy(STRATEGY)
+            .build()
 
-            connectionsClient.startAdvertising(
-                activeDeviceName,
-                SERVICE_ID,
-                connectionLifecycleCallback,
-                advertisingOptions
-            ).addOnSuccessListener {
-                Log.d(TAG, "Started advertising open room as host: $activeDeviceName")
-            }.addOnFailureListener { e ->
-                Log.e(TAG, "Failed to start advertising: ${e.message}", e)
-            }
-        } else {
-            val discoveryOptions = DiscoveryOptions.Builder()
-                .setStrategy(STRATEGY)
-                .build()
+        connectionsClient.startAdvertising(
+            advertisedName,
+            SERVICE_ID,
+            connectionLifecycleCallback,
+            advertisingOptions
+        ).addOnSuccessListener {
+            Log.d(TAG, "Started advertising as $advertisedName")
+        }.addOnFailureListener { e ->
+            isAdvertising = false
+            Log.e(TAG, "Failed to start advertising: ${e.message}", e)
+        }
+    }
 
-            connectionsClient.startDiscovery(
-                SERVICE_ID,
-                endpointDiscoveryCallback,
-                discoveryOptions
-            ).addOnSuccessListener {
-                Log.d(TAG, "Started discovery for open room as client: $activeDeviceName")
-            }.addOnFailureListener { e ->
-                Log.e(TAG, "Failed to start discovery: ${e.message}", e)
+    private fun startDiscoveryInternal() {
+        if (isDiscoveryPaused || isDiscovering) return
+        isDiscovering = true
+        val discoveryOptions = DiscoveryOptions.Builder()
+            .setStrategy(STRATEGY)
+            .build()
+
+        connectionsClient.startDiscovery(
+            SERVICE_ID,
+            endpointDiscoveryCallback,
+            discoveryOptions
+        ).addOnSuccessListener {
+            Log.d(TAG, "Started discovery as $advertisedName")
+        }.addOnFailureListener { e ->
+            isDiscovering = false
+            Log.e(TAG, "Failed to start discovery: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Requests a connection, retrying a few times. A discovered endpoint is only announced once
+     * per discovery session, so a single transient failure would otherwise leave the pair
+     * permanently disconnected.
+     */
+    private fun requestConnectionWithRetry(endpointId: String, attempt: Int = 0) {
+        if (_connectedPeers.value.containsKey(endpointId)) return
+
+        connectionsClient.requestConnection(
+            advertisedName,
+            endpointId,
+            connectionLifecycleCallback
+        ).addOnFailureListener { e ->
+            // ALREADY_CONNECTED is expected when discovery resumes after a transfer.
+            Log.w(TAG, "Request connection to $endpointId failed (attempt $attempt): ${e.message}")
+            if (attempt < 3) {
+                scope.launch {
+                    delay(1_500)
+                    requestConnectionWithRetry(endpointId, attempt + 1)
+                }
             }
         }
     }
@@ -244,8 +381,17 @@ class NearbyConnectionsManager(
             connectionsClient.stopAdvertising()
             connectionsClient.stopDiscovery()
             connectionsClient.stopAllEndpoints()
+            isAdvertising = false
+            isDiscovering = false
+            isDiscoveryPaused = false
             _connectedPeers.value = emptyMap()
             _transferProgress.value = null
+            peerNames.clear()
+            incomingPayloadMap.clear()
+            completedPayloadMap.clear()
+            fileHeaderMap.clear()
+            outgoingPayloadMap.keys.forEach { closeOutgoingDescriptor(it) }
+            outgoingPayloadMap.clear()
             Log.d(TAG, "Stopped open room and disconnected all endpoints")
         } catch (e: Exception) {
             Log.e(TAG, "Error in stopRoom: ${e.message}", e)
@@ -261,38 +407,40 @@ class NearbyConnectionsManager(
             }
     }
 
-    private var isDiscoveryPaused: Boolean = false
-
     override fun pauseDiscovery() {
-        if (!isHosting && !isDiscoveryPaused) {
+        if (!isDiscoveryPaused) {
             isDiscoveryPaused = true
-            connectionsClient.stopDiscovery()
+            if (isDiscovering) {
+                connectionsClient.stopDiscovery()
+                isDiscovering = false
+            }
             Log.d(TAG, "Paused BLE discovery to optimize Wi-Fi Direct streaming")
         }
     }
 
     override fun resumeDiscovery() {
-        if (!isHosting && isDiscoveryPaused) {
+        if (isDiscoveryPaused) {
             isDiscoveryPaused = false
-            val discoveryOptions = DiscoveryOptions.Builder()
-                .setStrategy(STRATEGY)
-                .build()
-            connectionsClient.startDiscovery(SERVICE_ID, endpointDiscoveryCallback, discoveryOptions)
+            startDiscoveryInternal()
             Log.d(TAG, "Resumed BLE discovery after payload transfer")
         }
     }
 
-    override suspend fun broadcastControl(message: ControlMessage) {
-        try {
+    override suspend fun broadcastControl(message: ControlMessage): Int {
+        return try {
             val bytes = ControlMessageSerializer.encode(message)
             val payload = Payload.fromBytes(bytes)
             val peers = _connectedPeers.value.keys.toList()
-            if (peers.isNotEmpty()) {
-                connectionsClient.sendPayload(peers, payload).await()
-                Log.d(TAG, "Broadcasted control message to ${peers.size} peers: $message")
+            if (peers.isEmpty()) {
+                Log.w(TAG, "No connected peers, control message not delivered: $message")
+                return 0
             }
+            connectionsClient.sendPayload(peers, payload).await()
+            Log.d(TAG, "Broadcasted control message to ${peers.size} peers: $message")
+            peers.size
         } catch (e: Exception) {
             Log.e(TAG, "Error in broadcastControl: ${e.message}", e)
+            0
         }
     }
 
@@ -311,16 +459,41 @@ class NearbyConnectionsManager(
         endpointId: String,
         uri: Uri,
         fileName: String,
-        mimeType: String
+        mimeType: String,
+        transferKind: String,
+        sessionId: String
     ): Long {
-        val pfd: ParcelFileDescriptor = context.contentResolver.openFileDescriptor(uri, "r")
-            ?: throw IllegalStateException("Cannot open ParcelFileDescriptor for URI: $uri")
+        val pfd = try {
+            context.contentResolver.openFileDescriptor(uri, "r")
+        } catch (e: Exception) {
+            Log.e(TAG, "Cannot open descriptor for $uri: ${e.message}", e)
+            null
+        } ?: throw IOException("Cannot open ParcelFileDescriptor for URI: $uri")
 
         val payload = Payload.fromFile(pfd)
         outgoingPayloadMap[payload.id] = endpointId
-        connectionsClient.sendPayload(endpointId, payload).await()
-        Log.d(TAG, "Initiated file payload ${payload.id} ($fileName) to $endpointId")
-        return payload.id
+        outgoingFdMap[payload.id] = pfd
+
+        try {
+            // Metadata travels as its own BYTES payload; the receiver buffers it by payload id.
+            sendControl(
+                endpointId,
+                ControlMessage.FileHeader(
+                    sessionId = sessionId,
+                    payloadId = payload.id,
+                    fileName = fileName,
+                    mimeType = mimeType,
+                    payloadType = transferKind
+                )
+            )
+            connectionsClient.sendPayload(endpointId, payload).await()
+            Log.d(TAG, "Initiated file payload ${payload.id} ($fileName, $mimeType) to $endpointId")
+            return payload.id
+        } catch (e: Exception) {
+            outgoingPayloadMap.remove(payload.id)
+            closeOutgoingDescriptor(payload.id)
+            throw e
+        }
     }
 
     override suspend fun sendBytes(endpointId: String, bytes: ByteArray): Long {
@@ -329,5 +502,33 @@ class NearbyConnectionsManager(
         connectionsClient.sendPayload(endpointId, payload).await()
         Log.d(TAG, "Sent bytes payload ${payload.id} (${bytes.size} bytes) to $endpointId")
         return payload.id
+    }
+
+    private fun emitCompletedFile(payloadId: Long) {
+        val completed = completedPayloadMap.remove(payloadId) ?: return
+        val header = fileHeaderMap.remove(payloadId)
+        scope.launch {
+            _incomingFiles.emit(
+                IncomingFilePayload(
+                    payloadId = payloadId,
+                    endpointId = completed.first,
+                    payload = completed.second,
+                    fileName = header?.fileName ?: "airgrab_$payloadId",
+                    mimeType = header?.mimeType ?: "application/octet-stream",
+                    transferKind = header?.payloadType ?: "FILE",
+                    sessionId = header?.sessionId ?: ""
+                )
+            )
+        }
+    }
+
+    private fun closeOutgoingDescriptor(payloadId: Long) {
+        outgoingFdMap.remove(payloadId)?.let { pfd ->
+            try {
+                pfd.close()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to close descriptor for $payloadId: ${e.message}")
+            }
+        }
     }
 }

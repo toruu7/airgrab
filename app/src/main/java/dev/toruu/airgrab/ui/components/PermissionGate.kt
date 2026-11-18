@@ -32,8 +32,9 @@ object PermissionHelper {
             permissions.add(Manifest.permission.BLUETOOTH_ADVERTISE)
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
             permissions.add(Manifest.permission.NEARBY_WIFI_DEVICES)
-            permissions.add(Manifest.permission.READ_MEDIA_IMAGES)
-            permissions.add(Manifest.permission.READ_MEDIA_VIDEO)
+            // NOTE: no READ_MEDIA_* here on purpose. Files always arrive through a SAF /
+            // share-sheet grant, and on Android 14+ "Select photos" leaves READ_MEDIA_IMAGES
+            // denied, which would block this all-or-nothing gate forever.
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             permissions.add(Manifest.permission.BLUETOOTH_SCAN)
             permissions.add(Manifest.permission.BLUETOOTH_ADVERTISE)
@@ -43,6 +44,10 @@ object PermissionHelper {
         } else {
             permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
             permissions.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            // Legacy public Downloads writes are only possible on API <= 28
+            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
+                permissions.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
         }
 
         return permissions

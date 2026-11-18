@@ -8,7 +8,12 @@ import kotlinx.coroutines.flow.StateFlow
 data class IncomingFilePayload(
     val payloadId: Long,
     val endpointId: String,
-    val payload: Payload
+    val payload: Payload,
+    val fileName: String,
+    val mimeType: String,
+    /** "MEDIA" | "FILE" | "FOLDER_ZIP" */
+    val transferKind: String,
+    val sessionId: String
 )
 
 interface NearbyTransport {
@@ -17,13 +22,23 @@ interface NearbyTransport {
     val incomingFiles: SharedFlow<IncomingFilePayload>
     val outgoingComplete: SharedFlow<Pair<Long, String>> // payloadId -> endpointId
     val transferProgress: StateFlow<Float?> // 0f..1f for large videos/folders
+    val transferFailed: SharedFlow<Long> // payloadId that failed/cancelled
 
-    fun startOpenRoom(deviceName: String = android.os.Build.MODEL, isHost: Boolean)
+    fun startAutoRoom(deviceName: String = android.os.Build.MODEL)
     fun stopRoom()
     fun cancelTransfer(payloadId: Long)
-    suspend fun broadcastControl(message: ControlMessage)
+
+    /** Returns the number of connected peers the message was handed to. */
+    suspend fun broadcastControl(message: ControlMessage): Int
     suspend fun sendControl(endpointId: String, message: ControlMessage)
-    suspend fun sendFile(endpointId: String, uri: Uri, fileName: String, mimeType: String): Long
+    suspend fun sendFile(
+        endpointId: String,
+        uri: Uri,
+        fileName: String,
+        mimeType: String,
+        transferKind: String = "FILE",
+        sessionId: String = ""
+    ): Long
     suspend fun sendBytes(endpointId: String, bytes: ByteArray): Long
     fun pauseDiscovery()
     fun resumeDiscovery()

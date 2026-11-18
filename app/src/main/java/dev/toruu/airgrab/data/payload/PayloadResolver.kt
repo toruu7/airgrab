@@ -178,7 +178,7 @@ class PayloadResolver(private val context: Context) {
 
         TransferPayload.FolderArchive(
             id = UUID.randomUUID().toString(),
-            displayName = "$folderName (Archive)",
+            displayName = folderName,
             totalBytes = tempZipFile.length(),
             treeUri = treeUri,
             zipUri = tempZipFile.toUri(),
@@ -221,7 +221,7 @@ class PayloadResolver(private val context: Context) {
 
         TransferPayload.FolderArchive(
             id = UUID.randomUUID().toString(),
-            displayName = "$archiveName.zip ($fileCount files)",
+            displayName = archiveName,
             totalBytes = tempZipFile.length(),
             treeUri = tempZipFile.toUri(),
             zipUri = tempZipFile.toUri(),

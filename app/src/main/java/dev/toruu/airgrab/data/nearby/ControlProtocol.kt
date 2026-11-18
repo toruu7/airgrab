@@ -37,6 +37,31 @@ sealed interface ControlMessage {
         val success: Boolean,
         val errorMessage: String? = null
     ) : ControlMessage
+
+    /**
+     * Sent immediately before the matching FILE payload so the receiver knows the original
+     * file name, mime type and logical payload kind. Nearby does not preserve ordering between
+     * BYTES and FILE payloads, so receivers buffer this header by [payloadId].
+     */
+    @Serializable
+    data class FileHeader(
+        val sessionId: String,
+        val payloadId: Long,
+        val fileName: String,
+        val mimeType: String,
+        val payloadType: String // "MEDIA" | "FILE" | "FOLDER_ZIP"
+    ) : ControlMessage
+
+    /**
+     * Text / link payloads are delivered over the control channel (a BYTES payload) instead of
+     * being sent as a raw byte blob, so the receiver can copy them to the clipboard.
+     */
+    @Serializable
+    data class TextContent(
+        val sessionId: String,
+        val text: String,
+        val isUrl: Boolean
+    ) : ControlMessage
 }
 
 object ControlMessageSerializer {

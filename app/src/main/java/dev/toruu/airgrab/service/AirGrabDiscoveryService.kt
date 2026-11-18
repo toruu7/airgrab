@@ -11,10 +11,12 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import dev.toruu.airgrab.AirGrabApp
 import dev.toruu.airgrab.MainActivity
 import dev.toruu.airgrab.R
 import dev.toruu.airgrab.data.nearby.ControlMessage
 import dev.toruu.airgrab.data.nearby.NearbyConnectionsManager
+import dev.toruu.airgrab.domain.GrabDropStateMachine
 import dev.toruu.airgrab.ui.ReceiverWakeActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,9 +41,6 @@ class AirGrabDiscoveryService : Service() {
 
         @Volatile
         var isServiceRunning: Boolean = false
-            private set
-
-        var sharedNearbyManager: NearbyConnectionsManager? = null
             private set
 
         fun start(context: Context) {
@@ -72,9 +71,8 @@ class AirGrabDiscoveryService : Service() {
         isServiceRunning = true
         createNotificationChannels()
 
-        val manager = NearbyConnectionsManager(applicationContext)
-        nearbyTransport = manager
-        sharedNearbyManager = manager
+        // Share the single process-wide transport (Nearby keeps one client per app).
+        nearbyTransport = AirGrabApp.from(this).transport
 
         startServiceForeground()
         listenForGrabSignals()
@@ -87,8 +85,8 @@ class AirGrabDiscoveryService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_START -> {
-                // Ensure advertising is active as host for ambient drops
-                nearbyTransport?.startOpenRoom(Build.MODEL, isHost = true)
+                // Advertising is already started (idempotently) in startServiceForeground().
+                Log.d(TAG, "Ambient discovery already hosting the open room")
             }
         }
         return START_STICKY
@@ -161,8 +159,8 @@ class AirGrabDiscoveryService : Service() {
             startForeground(SERVICE_NOTIFICATION_ID, notification)
         }
 
-        nearbyTransport?.startOpenRoom(Build.MODEL, isHost = true)
-        Log.d(TAG, "AirGrabDiscoveryService started in foreground with connectedDevice type (hosting open room)")
+        nearbyTransport?.startAutoRoom(Build.MODEL)
+        Log.d(TAG, "AirGrabDiscoveryService started in foreground (symmetric advertise + discover)")
     }
 
     private fun listenForGrabSignals() {
@@ -192,6 +190,13 @@ class AirGrabDiscoveryService : Service() {
     private fun handleIncomingGrab(endpointId: String, grabReady: ControlMessage.GrabReady) {
         if (isRateLimited()) return
 
+        if (AirGrabApp.from(this).isAppForeground) {
+            // The activity is on screen and arms itself from the shared transport; launching a
+            // second drop UI here would race with it for the same payload.
+            Log.d(TAG, "App is foreground, in-app receiver handles this grab")
+            return
+        }
+
         Log.d(TAG, "Grab signal detected from ${grabReady.senderName} (${grabReady.fileName}). Waking screen...")
 
         // Robust wake lock to turn on screen across modern Samsung/Honor/Android devices
@@ -201,16 +206,24 @@ class AirGrabDiscoveryService : Service() {
             PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.ON_AFTER_RELEASE,
             "airgrab:wake_alert"
         )
-        wakeLock.acquire(8000L)
+        // Keep the screen on for the whole drop window (12s) plus launch overhead.
+        wakeLock.acquire(13_000L)
 
         val wakeIntent = Intent(this, ReceiverWakeActivity::class.java).apply {
             putExtra(ReceiverWakeActivity.EXTRA_SESSION_ID, grabReady.sessionId)
-            putExtra(ReceiverWakeActivity.EXTRA_SENDER_ENDPOINT_ID, grabReady.senderEndpointId)
+            // Pass the endpoint the GrabReady actually arrived from - that is the only id this
+            // device can use to send AcceptDrop back. grabReady.senderEndpointId belongs to the
+            // sender's own view of its peers and is not routable here.
+            putExtra(ReceiverWakeActivity.EXTRA_SENDER_ENDPOINT_ID, endpointId)
             putExtra(ReceiverWakeActivity.EXTRA_SENDER_NAME, grabReady.senderName)
             putExtra(ReceiverWakeActivity.EXTRA_FILE_NAME, grabReady.fileName)
             putExtra(ReceiverWakeActivity.EXTRA_MIME_TYPE, grabReady.mimeType)
             putExtra(ReceiverWakeActivity.EXTRA_SIZE_BYTES, grabReady.sizeBytes)
-            putExtra(ReceiverWakeActivity.EXTRA_EXPIRES_AT, grabReady.expiresAtEpochMs)
+            // Local deadline: the sender's absolute timestamp comes from a different clock.
+            putExtra(
+                ReceiverWakeActivity.EXTRA_EXPIRES_AT,
+                System.currentTimeMillis() + GrabDropStateMachine.GRAB_READY_TTL_MS
+            )
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                     Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
                     Intent.FLAG_ACTIVITY_CLEAR_TOP or
@@ -251,8 +264,11 @@ class AirGrabDiscoveryService : Service() {
         super.onDestroy()
         isServiceRunning = false
         serviceScope.cancel()
-        nearbyTransport?.stopRoom()
-        sharedNearbyManager = null
+        // The transport is shared with the activity; only close the room when ambient mode is
+        // explicitly turned off and the UI is not using it.
+        if (!AirGrabApp.from(this).isAppForeground) {
+            nearbyTransport?.stopRoom()
+        }
         Log.d(TAG, "AirGrabDiscoveryService destroyed")
     }
 

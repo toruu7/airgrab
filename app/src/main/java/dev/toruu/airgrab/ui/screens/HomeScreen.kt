@@ -33,7 +33,6 @@ fun HomeScreen(
     modifier: Modifier = Modifier
 ) {
     val connectedPeers by viewModel.connectedPeers.collectAsState()
-    val isHost by viewModel.isHost.collectAsState()
 
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -65,20 +64,7 @@ fun HomeScreen(
                         )
                     }
                 },
-                actions = {
-                    AssistChip(
-                        onClick = { viewModel.toggleHostMode() },
-                        label = { Text(if (isHost) "Hosting" else "Scanning") },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = if (isHost) Icons.Default.Sensors else Icons.Default.Search,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        },
-                        modifier = Modifier.padding(end = 8.dp)
-                    )
-                }
+                actions = {}
             )
         }
     ) { innerPadding ->
@@ -218,89 +204,53 @@ fun HomeScreen(
 
             item {
                 Text(
-                    text = "Transfer Modes",
+                    text = "One Mode, Both Directions",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
             }
 
             item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                Card(
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { viewModel.setAppMode(AppMode.ACTIVE) }
                 ) {
-                    Card(
-                        shape = RoundedCornerShape(20.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant
-                        ),
+                    Row(
                         modifier = Modifier
-                            .weight(1f)
-                            .height(140.dp)
-                            .clickable { viewModel.setAppMode(AppMode.SENDER) }
+                            .fillMaxWidth()
+                            .padding(20.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(16.dp),
-                            verticalArrangement = Arrangement.Center,
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.FrontHand,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(40.dp)
-                            )
-                            Spacer(modifier = Modifier.height(10.dp))
+                        Icon(
+                            imageVector = Icons.Default.SwapVert,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(40.dp)
+                        )
+                        Spacer(modifier = Modifier.width(16.dp))
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Sender Mode",
+                                text = "Open AirGrab",
                                 fontWeight = FontWeight.Bold,
-                                style = MaterialTheme.typography.titleSmall
+                                style = MaterialTheme.typography.titleMedium
                             )
+                            Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "Grab to send",
+                                text = "Grab to send, palm to receive. No mode switching.",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
                             )
                         }
-                    }
-
-                    Card(
-                        shape = RoundedCornerShape(20.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant
-                        ),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(140.dp)
-                            .clickable { viewModel.setAppMode(AppMode.RECEIVER) }
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(16.dp),
-                            verticalArrangement = Arrangement.Center,
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.PanTool,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.secondary,
-                                modifier = Modifier.size(40.dp)
-                            )
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Text(
-                                text = "Receiver Mode",
-                                fontWeight = FontWeight.Bold,
-                                style = MaterialTheme.typography.titleSmall
-                            )
-                            Text(
-                                text = "Palm to receive",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                        Icon(
+                            imageVector = Icons.Default.ChevronRight,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary
+                        )
                     }
                 }
             }

@@ -17,9 +17,7 @@ import androidx.compose.ui.graphics.Color
 import dev.toruu.airgrab.ui.AirGrabViewModel
 import dev.toruu.airgrab.ui.AppMode
 import dev.toruu.airgrab.ui.components.PermissionGate
-import dev.toruu.airgrab.ui.screens.HomeScreen
-import dev.toruu.airgrab.ui.screens.ReceiverScreen
-import dev.toruu.airgrab.ui.screens.SenderScreen
+import dev.toruu.airgrab.ui.screens.AirGrabSurface
 
 class MainActivity : ComponentActivity() {
 
@@ -45,6 +43,7 @@ class MainActivity : ComponentActivity() {
         )
 
         handleIntent(intent)
+        viewModel.setAppMode(AppMode.ACTIVE)
 
         setContent {
             AirGrabTheme {
@@ -53,6 +52,16 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        viewModel.onAppForegroundChanged(true)
+    }
+
+    override fun onStop() {
+        viewModel.onAppForegroundChanged(false)
+        super.onStop()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -66,7 +75,7 @@ class MainActivity : ComponentActivity() {
 
         when (intent.action) {
             ACTION_OPEN_RECEIVER -> {
-                viewModel.setAppMode(AppMode.RECEIVER)
+                viewModel.setAppMode(AppMode.ACTIVE)
             }
             Intent.ACTION_SEND,
             Intent.ACTION_SEND_MULTIPLE -> {
@@ -78,17 +87,11 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun AirGrabMainNavigation(viewModel: AirGrabViewModel) {
-    val mode by viewModel.appMode.collectAsState()
-
     Surface(
         modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background
+        color = Color(0xFF050608)
     ) {
-        when (mode) {
-            AppMode.HOME -> HomeScreen(viewModel = viewModel)
-            AppMode.SENDER -> SenderScreen(viewModel = viewModel)
-            AppMode.RECEIVER -> ReceiverScreen(viewModel = viewModel)
-        }
+        AirGrabSurface(viewModel = viewModel)
     }
 }
 
@@ -98,18 +101,18 @@ fun AirGrabTheme(
     content: @Composable () -> Unit
 ) {
     val darkColorScheme = darkColorScheme(
-        primary = Color(0xFFD0BCFF),
-        onPrimary = Color(0xFF381E72),
-        primaryContainer = Color(0xFF4F378B),
-        onPrimaryContainer = Color(0xFFEADDFF),
-        secondary = Color(0xFFCCC2DC),
-        onSecondary = Color(0xFF332D41),
-        background = Color(0xFF141218),
-        onBackground = Color(0xFFE6E0E9),
-        surface = Color(0xFF1D1B20),
-        onSurface = Color(0xFFE6E0E9),
-        surfaceVariant = Color(0xFF2B2930),
-        onSurfaceVariant = Color(0xFFCAC4D0)
+        primary = Color(0xFF00F0FF),
+        onPrimary = Color(0xFF050608),
+        primaryContainer = Color(0x1AFFFFFF),
+        onPrimaryContainer = Color(0xFFF5F5F7),
+        secondary = Color(0xFF00FFA3),
+        onSecondary = Color(0xFF050608),
+        background = Color(0xFF050608),
+        onBackground = Color(0xFFF5F5F7),
+        surface = Color(0xFF0B0C10),
+        onSurface = Color(0xFFF5F5F7),
+        surfaceVariant = Color(0x14FFFFFF),
+        onSurfaceVariant = Color(0xFF8E8E93)
     )
 
     MaterialTheme(
