@@ -9,12 +9,18 @@ import android.view.HapticFeedbackConstants
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -49,9 +55,10 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import coil3.compose.AsyncImage
 import dev.toruu.airgrab.data.payload.PayloadSaver
+import dev.toruu.airgrab.data.payload.PreviewBitmapState
 import dev.toruu.airgrab.data.payload.TransferPayload
+import dev.toruu.airgrab.data.payload.rememberPreviewBitmap
 import dev.toruu.airgrab.data.vision.HandGesture
 import dev.toruu.airgrab.domain.ReceiverState
 import dev.toruu.airgrab.domain.SenderState
@@ -66,6 +73,17 @@ import dev.toruu.airgrab.ui.components.spatialAura
 import dev.toruu.airgrab.ui.theme.AirGrabMotion
 import dev.toruu.airgrab.ui.theme.AirGrabPalette
 import dev.toruu.airgrab.ui.theme.LocalAirGrabPalette
+
+private enum class StageViewKind {
+    STAGING,
+    RECEIVING,
+    DELIVERED,
+    ARMED,
+    TRANSFERRING,
+    SENT,
+    STAGED_OR_GRABBED,
+    IDLE
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -93,7 +111,7 @@ fun AirGrabSurface(
         viewModel.setAppMode(AppMode.ACTIVE)
     }
 
-    // Bind front camera whenever foregrounded, unbind cleanly via MainActivity.onStop.
+    // Bind front camera whenever foregrounded; unbind cleanly via MainActivity.onStop.
     DisposableEffect(lifecycleOwner) {
         if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
             viewModel.bindCamera(lifecycleOwner)
@@ -147,22 +165,51 @@ fun AirGrabSurface(
         palette.accentSendAura
     }
 
+    val auraIntensity = when {
+        gestureResult.gesture != HandGesture.NONE && gestureResult.confidence > 0.15f ->
+            gestureResult.confidence
+        isGrabbed -> 0.55f
+        isArmed || isReceiving -> 0.40f
+        else -> 0f
+    }
+
+    val stageKind = when {
+        isStaging -> StageViewKind.STAGING
+        isReceiving -> StageViewKind.RECEIVING
+        delivered != null -> StageViewKind.DELIVERED
+        isArmed -> StageViewKind.ARMED
+        isTransferring -> StageViewKind.TRANSFERRING
+        sent != null -> StageViewKind.SENT
+        senderState is SenderState.Staged || isGrabbed -> StageViewKind.STAGED_OR_GRABBED
+        else -> StageViewKind.IDLE
+    }
+
+    val stagePhase = when {
+        isReceiving || isTransferring -> SpatialCardPhase.RELEASING
+        delivered != null || sent != null -> SpatialCardPhase.DELIVERED
+        isGrabbed || isArmed -> SpatialCardPhase.GRABBED
+        else -> SpatialCardPhase.RESTING
+    }
+
+    val effectTriggerKey: Any? = when {
+        isReceiving -> "rec_rel_${(receiverState as ReceiverState.Receiving).sessionId}"
+        delivered != null -> "rec_del_${delivered.sessionId}"
+        isTransferring -> "send_rel_${(senderState as SenderState.Transferring).sessionId}"
+        sent != null -> "send_done_${sent.sessionId}"
+        isGrabbed -> "send_grab_${(senderState as SenderState.Grabbed).sessionId}"
+        isArmed -> "rec_arm_${(receiverState as ReceiverState.Armed).grabReady.sessionId}"
+        else -> null
+    }
+    val isOutwardEffect = isReceiving || delivered != null || isTransferring || sent != null
+
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(palette.canvas)
             .spatialAura(
                 color = auraColor,
-                maxAlpha = if (palette.isDark) 0.42f else 0.30f,
-                intensity = {
-                    val activeReceive = isArmed || isReceiving
-                    when {
-                        gestureResult.gesture != HandGesture.NONE && gestureResult.confidence > 0.15f ->
-                            gestureResult.confidence
-                        activeReceive -> 0.35f
-                        else -> 0f
-                    }
-                }
+                intensity = auraIntensity,
+                maxAlpha = if (palette.isDark) 0.28f else 0.20f
             )
     ) {
         Column(
@@ -181,7 +228,6 @@ fun AirGrabSurface(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                // Ambient Network Status Pill
                 Surface(
                     shape = CircleShape,
                     color = palette.surfaceGlass,
@@ -265,7 +311,7 @@ fun AirGrabSurface(
                 }
             }
 
-            // Transient status message banner (clipboard empty, waiting for peer, interrupted)
+            // Transient status notice banner
             AnimatedVisibility(
                 visible = statusMessage != null,
                 enter = fadeIn(if (palette.reduceMotion) snap() else AirGrabMotion.LayoutSettle),
@@ -274,7 +320,7 @@ fun AirGrabSurface(
                 statusMessage?.let { msg ->
                     Surface(
                         shape = RoundedCornerShape(16.dp),
-                        color = palette.surfaceGlass,
+                        color = palette.surfaceCard,
                         border = BorderStroke(1.dp, palette.borderHairline),
                         modifier = Modifier
                             .widthIn(max = 460.dp)
@@ -305,101 +351,113 @@ fun AirGrabSurface(
                 }
             }
 
-            // --- Center Adaptive Scrollable Stage ---
-            val effectTriggerKey: Any? = when {
-                isReceiving -> "rec_rel_${(receiverState as ReceiverState.Receiving).sessionId}"
-                delivered != null -> "rec_del_${delivered.sessionId}"
-                isTransferring -> "send_rel_${(senderState as SenderState.Transferring).sessionId}"
-                sent != null -> "send_done_${sent.sessionId}"
-                isGrabbed -> "send_grab_${(senderState as SenderState.Grabbed).sessionId}"
-                isArmed -> "rec_arm_${(receiverState as ReceiverState.Armed).grabReady.sessionId}"
-                else -> null
-            }
-            val isOutwardEffect = isReceiving || delivered != null || isTransferring || sent != null
-
-            Box(
+            // --- Unconstrained Full-Stage 3D Glow Field ---
+            SpatialGlowField(
+                phase = stagePhase,
+                triggerKey = effectTriggerKey,
+                isOutwardRelease = isOutwardEffect,
+                glowColor = auraColor,
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(vertical = 20.dp),
-                contentAlignment = Alignment.Center
             ) {
-                SpatialGlowField(
-                    triggerKey = effectTriggerKey,
-                    isOutwardRelease = isOutwardEffect,
-                    glowColor = auraColor
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(vertical = 20.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    when {
-                        isStaging -> {
-                            StagingLoadingCard(palette = palette)
-                        }
+                    AnimatedContent(
+                        targetState = stageKind,
+                        transitionSpec = {
+                            if (palette.reduceMotion) {
+                                fadeIn(snap()) togetherWith fadeOut(snap())
+                            } else {
+                                (fadeIn(tween(240)) + scaleIn(
+                                    initialScale = 0.94f,
+                                    animationSpec = tween(260)
+                                )) togetherWith fadeOut(tween(180))
+                            }
+                        },
+                        label = "StageTransition"
+                    ) { kind ->
+                        when (kind) {
+                            StageViewKind.STAGING -> StagingLoadingCard(palette = palette)
 
-                        isReceiving -> {
-                            val incomingState = receiverState as ReceiverState.Receiving
-                            TransferProgressCard(
-                                title = "Receiving",
-                                fileName = incomingState.grabReady.fileName,
-                                progress = transferProgress ?: incomingState.progress,
-                                accentColor = palette.accentReceive,
-                                palette = palette,
-                                onCancel = { viewModel.resetReceiverForNextDrop() }
-                            )
-                        }
+                            StageViewKind.RECEIVING -> {
+                                val incomingState = receiverState as? ReceiverState.Receiving
+                                if (incomingState != null) {
+                                    TransferProgressCard(
+                                        title = "Receiving",
+                                        fileName = incomingState.grabReady.fileName,
+                                        progress = transferProgress ?: incomingState.progress,
+                                        accentColor = palette.accentReceive,
+                                        palette = palette,
+                                        onCancel = { viewModel.resetReceiverForNextDrop() }
+                                    )
+                                }
+                            }
 
-                        delivered != null -> {
-                            DeliveredCard(
-                                result = delivered.result,
-                                palette = palette,
-                                onDone = { viewModel.resetReceiverForNextDrop() }
-                            )
-                        }
+                            StageViewKind.DELIVERED -> {
+                                if (delivered != null) {
+                                    DeliveredCard(
+                                        result = delivered.result,
+                                        palette = palette,
+                                        onDone = { viewModel.resetReceiverForNextDrop() }
+                                    )
+                                }
+                            }
 
-                        isArmed -> {
-                            val armedState = receiverState as ReceiverState.Armed
-                            ArmedCatchCard(
-                                fileName = armedState.grabReady.fileName,
-                                senderName = armedState.grabReady.senderName,
-                                sizeBytes = armedState.grabReady.sizeBytes,
-                                textPreview = armedState.grabReady.textPreview,
-                                palette = palette
-                            )
-                        }
+                            StageViewKind.ARMED -> {
+                                val armedState = receiverState as? ReceiverState.Armed
+                                if (armedState != null) {
+                                    ArmedCatchCard(
+                                        fileName = armedState.grabReady.fileName,
+                                        senderName = armedState.grabReady.senderName,
+                                        sizeBytes = armedState.grabReady.sizeBytes,
+                                        textPreview = armedState.grabReady.textPreview,
+                                        palette = palette
+                                    )
+                                }
+                            }
 
-                        isTransferring -> {
-                            val transferringState = senderState as SenderState.Transferring
-                            TransferProgressCard(
-                                title = "Sending",
-                                fileName = transferringState.payload.displayName,
-                                progress = transferProgress ?: transferringState.progress,
-                                accentColor = palette.accentSend,
-                                palette = palette,
-                                onCancel = { viewModel.cancelTransfer() }
-                            )
-                        }
+                            StageViewKind.TRANSFERRING -> {
+                                val transferringState = senderState as? SenderState.Transferring
+                                if (transferringState != null) {
+                                    TransferProgressCard(
+                                        title = "Sending",
+                                        fileName = transferringState.payload.displayName,
+                                        progress = transferProgress ?: transferringState.progress,
+                                        accentColor = palette.accentSend,
+                                        palette = palette,
+                                        onCancel = { viewModel.cancelTransfer() }
+                                    )
+                                }
+                            }
 
-                        sent != null -> {
-                            SentConfirmationCard(
-                                displayName = sent.displayName,
-                                palette = palette,
-                                onDone = { viewModel.resetSenderForNextSend() }
-                            )
-                        }
+                            StageViewKind.SENT -> {
+                                if (sent != null) {
+                                    SentConfirmationCard(
+                                        displayName = sent.displayName,
+                                        palette = palette,
+                                        onDone = { viewModel.resetSenderForNextSend() }
+                                    )
+                                }
+                            }
 
-                        senderState is SenderState.Staged || isGrabbed -> {
-                            val payload = (senderState as? SenderState.Staged)?.payload
-                                ?: (senderState as? SenderState.Grabbed)?.payload
+                            StageViewKind.STAGED_OR_GRABBED -> {
+                                val payload = (senderState as? SenderState.Staged)?.payload
+                                    ?: (senderState as? SenderState.Grabbed)?.payload
+                                StagedPayloadCard(
+                                    payload = payload,
+                                    isGrabbed = isGrabbed,
+                                    hasConnectedPeers = connectedPeers.isNotEmpty(),
+                                    palette = palette
+                                )
+                            }
 
-                            StagedPayloadCard(
-                                payload = payload,
-                                isGrabbed = isGrabbed,
-                                hasConnectedPeers = connectedPeers.isNotEmpty(),
-                                palette = palette
-                            )
-                        }
-
-                        else -> {
-                            IdleAmbientCanvas(palette = palette)
+                            StageViewKind.IDLE -> IdleAmbientCanvas(palette = palette)
                         }
                     }
                 }
@@ -418,7 +476,6 @@ fun AirGrabSurface(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier.widthIn(max = 460.dp)
                 ) {
-                    // Primary Floating Pill: Stage File
                     Surface(
                         shape = RoundedCornerShape(28.dp),
                         color = palette.surfaceGlass,
@@ -556,7 +613,6 @@ private fun AmbientSettingsSheet(
                 color = palette.textPrimary
             )
 
-            // Ambient Service Switch Row
             Surface(
                 shape = RoundedCornerShape(20.dp),
                 color = palette.surfaceSubtle,
@@ -594,7 +650,6 @@ private fun AmbientSettingsSheet(
                 }
             }
 
-            // Lockscreen Wake Permissions
             if (!canDrawOverlay || !canFullScreen) {
                 Surface(
                     shape = RoundedCornerShape(20.dp),
@@ -635,7 +690,6 @@ private fun AmbientSettingsSheet(
                 }
             }
 
-            // Nearby Mesh Devices
             Text(
                 text = if (connectedPeers.isEmpty()) {
                     "No nearby devices linked yet"
@@ -664,6 +718,66 @@ private fun AmbientSettingsSheet(
                         color = palette.textPrimary
                     )
                 }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RELIABLE MEDIA THUMBNAIL COMPONENT
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun MediaPreviewBox(
+    uri: Uri,
+    mimeType: String?,
+    contentDescription: String,
+    palette: AirGrabPalette,
+    modifier: Modifier = Modifier
+) {
+    val previewState = rememberPreviewBitmap(uri = uri, mimeType = mimeType)
+    val isVideo = mimeType?.startsWith("video/", ignoreCase = true) == true
+
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        when (previewState) {
+            is PreviewBitmapState.Ready -> {
+                Image(
+                    bitmap = previewState.bitmap,
+                    contentDescription = contentDescription,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+                if (isVideo) {
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.56f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PlayArrow,
+                            contentDescription = "Video",
+                            tint = Color.White,
+                            modifier = Modifier.size(26.dp)
+                        )
+                    }
+                }
+            }
+            is PreviewBitmapState.Loading -> {
+                CircularProgressIndicator(
+                    color = palette.accentSend,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+            is PreviewBitmapState.Unavailable -> {
+                Icon(
+                    imageVector = if (isVideo) Icons.Default.Videocam else Icons.Default.Image,
+                    contentDescription = contentDescription,
+                    tint = palette.accentSend,
+                    modifier = Modifier.size(52.dp)
+                )
             }
         }
     }
@@ -721,18 +835,16 @@ private fun IdleAmbientCanvas(palette: AirGrabPalette) {
 
 @Composable
 private fun StagingLoadingCard(palette: AirGrabPalette) {
-    Surface(
-        shape = RoundedCornerShape(28.dp),
-        color = palette.surfaceGlass,
-        border = BorderStroke(1.dp, palette.borderHairline),
+    Box(
         modifier = Modifier
             .widthIn(max = 440.dp)
             .fillMaxWidth()
+            .background(palette.surfaceCard, RoundedCornerShape(28.dp))
+            .border(1.dp, palette.borderHairline, RoundedCornerShape(28.dp))
+            .padding(32.dp),
+        contentAlignment = Alignment.Center
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.padding(32.dp)
-        ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
             CircularProgressIndicator(
                 color = palette.accentSend,
                 strokeWidth = 3.dp,
@@ -770,20 +882,17 @@ private fun StagedPayloadCard(
                     phase = if (isGrabbed) SpatialCardPhase.GRABBED else SpatialCardPhase.RESTING,
                     glowColor = palette.accentSend
                 )
-                .clip(RoundedCornerShape(28.dp))
-                .background(palette.surfaceGlass)
-                .then(
-                    if (!isGrabbed) Modifier.border(1.dp, palette.borderHairline, RoundedCornerShape(28.dp))
-                    else Modifier
-                ),
+                .background(palette.surfaceCard, RoundedCornerShape(28.dp))
+                .clip(RoundedCornerShape(28.dp)),
             contentAlignment = Alignment.Center
         ) {
             when (payload) {
                 is TransferPayload.MediaItem -> {
-                    AsyncImage(
-                        model = payload.uri,
+                    MediaPreviewBox(
+                        uri = payload.uri,
+                        mimeType = payload.mimeType,
                         contentDescription = payload.displayName,
-                        contentScale = ContentScale.Crop,
+                        palette = palette,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -836,7 +945,7 @@ private fun StagedPayloadCard(
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(18.dp))
 
         Text(
             text = payload?.displayName ?: "Staged Item",
@@ -882,8 +991,7 @@ private fun ArmedCatchCard(
 ) {
     val context = LocalContext.current
 
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
+    Box(
         modifier = Modifier
             .widthIn(max = 440.dp)
             .fillMaxWidth()
@@ -891,76 +999,81 @@ private fun ArmedCatchCard(
                 phase = SpatialCardPhase.GRABBED,
                 glowColor = palette.accentReceive
             )
-            .background(palette.surfaceGlass, RoundedCornerShape(28.dp))
+            .background(palette.surfaceCard, RoundedCornerShape(28.dp))
             .padding(28.dp)
             .semantics { liveRegion = LiveRegionMode.Polite }
     ) {
-        Box(
-            modifier = Modifier
-                .size(56.dp)
-                .clip(CircleShape)
-                .background(palette.accentReceive.copy(alpha = 0.14f)),
-            contentAlignment = Alignment.Center
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Icon(
-                imageVector = Icons.Default.PanTool,
-                contentDescription = null,
-                tint = palette.accentReceive,
-                modifier = Modifier.size(26.dp)
-            )
-        }
+            Box(
+                modifier = Modifier
+                    .size(56.dp)
+                    .clip(CircleShape)
+                    .background(palette.accentReceive.copy(alpha = 0.14f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PanTool,
+                    contentDescription = null,
+                    tint = palette.accentReceive,
+                    modifier = Modifier.size(26.dp)
+                )
+            }
 
-        Spacer(modifier = Modifier.height(18.dp))
+            Spacer(modifier = Modifier.height(18.dp))
 
-        Text(
-            text = "Incoming Drop",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            color = palette.accentReceive
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Text(
-            text = fileName,
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.SemiBold,
-            color = palette.textPrimary,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = TextAlign.Center
-        )
-
-        if (!textPreview.isNullOrBlank()) {
-            Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = textPreview,
-                style = MaterialTheme.typography.bodySmall,
-                color = palette.textSecondary,
-                maxLines = 3,
+                text = "Incoming Drop",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = palette.accentReceive
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = fileName,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = palette.textPrimary,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Center
             )
-        }
 
-        if (sizeBytes > 0) {
-            Spacer(modifier = Modifier.height(6.dp))
+            if (!textPreview.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = textPreview,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = palette.textSecondary,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center
+                )
+            }
+
+            if (sizeBytes > 0) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = Formatter.formatFileSize(context, sizeBytes),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = palette.textSecondary,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
             Text(
-                text = Formatter.formatFileSize(context, sizeBytes),
+                text = "From $senderName • Open palm to catch",
                 style = MaterialTheme.typography.bodySmall,
                 color = palette.textSecondary,
-                fontFamily = FontFamily.Monospace
+                textAlign = TextAlign.Center
             )
         }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        Text(
-            text = "From $senderName • Open palm to catch",
-            style = MaterialTheme.typography.bodySmall,
-            color = palette.textSecondary,
-            textAlign = TextAlign.Center
-        )
     }
 }
 
@@ -979,8 +1092,7 @@ private fun TransferProgressCard(
         label = "ProgressAnimation"
     )
 
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
+    Box(
         modifier = Modifier
             .widthIn(max = 440.dp)
             .fillMaxWidth()
@@ -988,59 +1100,64 @@ private fun TransferProgressCard(
                 phase = SpatialCardPhase.RELEASING,
                 glowColor = accentColor
             )
-            .background(palette.surfaceGlass, RoundedCornerShape(28.dp))
+            .background(palette.surfaceCard, RoundedCornerShape(28.dp))
             .padding(28.dp)
             .semantics { liveRegion = LiveRegionMode.Polite }
     ) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            color = palette.textPrimary
-        )
-
-        Spacer(modifier = Modifier.height(6.dp))
-
-        Text(
-            text = fileName,
-            style = MaterialTheme.typography.bodySmall,
-            color = palette.textSecondary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-
-        Spacer(modifier = Modifier.height(22.dp))
-
-        LinearProgressIndicator(
-            progress = { animatedProgress },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(4.dp)
-                .clip(CircleShape),
-            color = accentColor,
-            trackColor = palette.surfaceSubtle
-        )
-
-        Spacer(modifier = Modifier.height(14.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.fillMaxWidth()
         ) {
             Text(
-                text = "${(animatedProgress * 100).toInt()}%",
-                style = MaterialTheme.typography.labelLarge,
-                fontFamily = FontFamily.Monospace,
-                color = accentColor,
-                fontWeight = FontWeight.Bold
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = palette.textPrimary
             )
 
-            TextButton(
-                onClick = onCancel,
-                modifier = Modifier.heightIn(min = 48.dp)
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(
+                text = fileName,
+                style = MaterialTheme.typography.bodySmall,
+                color = palette.textSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            Spacer(modifier = Modifier.height(22.dp))
+
+            LinearProgressIndicator(
+                progress = { animatedProgress },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .clip(CircleShape),
+                color = accentColor,
+                trackColor = palette.surfaceSubtle
+            )
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Cancel", color = palette.textSecondary)
+                Text(
+                    text = "${(animatedProgress * 100).toInt()}%",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontFamily = FontFamily.Monospace,
+                    color = accentColor,
+                    fontWeight = FontWeight.Bold
+                )
+
+                TextButton(
+                    onClick = onCancel,
+                    modifier = Modifier.heightIn(min = 48.dp)
+                ) {
+                    Text("Cancel", color = palette.textSecondary)
+                }
             }
         }
     }
@@ -1052,8 +1169,7 @@ private fun SentConfirmationCard(
     palette: AirGrabPalette,
     onDone: () -> Unit
 ) {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
+    Box(
         modifier = Modifier
             .widthIn(max = 440.dp)
             .fillMaxWidth()
@@ -1061,60 +1177,64 @@ private fun SentConfirmationCard(
                 phase = SpatialCardPhase.DELIVERED,
                 glowColor = palette.accentSend
             )
-            .background(palette.surfaceGlass, RoundedCornerShape(28.dp))
-            .border(1.5.dp, palette.accentSend, RoundedCornerShape(28.dp))
+            .background(palette.surfaceCard, RoundedCornerShape(28.dp))
             .padding(28.dp)
             .semantics { liveRegion = LiveRegionMode.Polite }
     ) {
-        Box(
-            modifier = Modifier
-                .size(56.dp)
-                .clip(CircleShape)
-                .background(palette.accentSend.copy(alpha = 0.14f)),
-            contentAlignment = Alignment.Center
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Icon(
-                imageVector = Icons.Default.Check,
-                contentDescription = null,
-                tint = palette.accentSend,
-                modifier = Modifier.size(28.dp)
+            Box(
+                modifier = Modifier
+                    .size(56.dp)
+                    .clip(CircleShape)
+                    .background(palette.accentSend.copy(alpha = 0.14f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = null,
+                    tint = palette.accentSend,
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(18.dp))
+
+            Text(
+                text = "Sent",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = palette.textPrimary
             )
-        }
 
-        Spacer(modifier = Modifier.height(18.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
-        Text(
-            text = "Sent",
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold,
-            color = palette.textPrimary
-        )
+            Text(
+                text = displayName,
+                style = MaterialTheme.typography.bodySmall,
+                color = palette.textSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center
+            )
 
-        Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(22.dp))
 
-        Text(
-            text = displayName,
-            style = MaterialTheme.typography.bodySmall,
-            color = palette.textSecondary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = TextAlign.Center
-        )
-
-        Spacer(modifier = Modifier.height(22.dp))
-
-        Button(
-            onClick = onDone,
-            shape = RoundedCornerShape(24.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = palette.accentSend,
-                contentColor = palette.onAccent
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 48.dp)
-        ) {
-            Text("Done", fontWeight = FontWeight.SemiBold)
+            Button(
+                onClick = onDone,
+                shape = RoundedCornerShape(24.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = palette.accentSend,
+                    contentColor = palette.onAccent
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+            ) {
+                Text("Done", fontWeight = FontWeight.SemiBold)
+            }
         }
     }
 }
@@ -1128,8 +1248,7 @@ fun DeliveredCard(
 ) {
     val context = LocalContext.current
 
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
+    Box(
         modifier = modifier
             .widthIn(max = 440.dp)
             .fillMaxWidth()
@@ -1137,93 +1256,115 @@ fun DeliveredCard(
                 phase = SpatialCardPhase.DELIVERED,
                 glowColor = palette.accentReceive
             )
-            .background(palette.surfaceGlass, RoundedCornerShape(28.dp))
-            .border(1.5.dp, palette.accentReceive, RoundedCornerShape(28.dp))
-            .padding(28.dp)
+            .background(palette.surfaceCard, RoundedCornerShape(28.dp))
+            .animateContentSize(if (palette.reduceMotion) snap() else tween(240))
+            .padding(24.dp)
             .semantics { liveRegion = LiveRegionMode.Polite }
     ) {
-        Box(
-            modifier = Modifier
-                .size(56.dp)
-                .clip(CircleShape)
-                .background(palette.accentReceive.copy(alpha = 0.14f)),
-            contentAlignment = Alignment.Center
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Icon(
-                imageVector = Icons.Default.Check,
-                contentDescription = null,
-                tint = palette.accentReceive,
-                modifier = Modifier.size(28.dp)
-            )
-        }
-
-        Spacer(modifier = Modifier.height(18.dp))
-
-        Text(
-            text = "Delivered",
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold,
-            color = palette.textPrimary
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        val detailText = when (result) {
-            is PayloadSaver.SaveResult.MediaSaved -> "Saved to Pictures/AirGrab • ${result.displayName}"
-            is PayloadSaver.SaveResult.FileSaved -> "Saved to Download/AirGrab • ${result.displayName}"
-            is PayloadSaver.SaveResult.FolderExtracted ->
-                "Extracted ${result.extractedCount} files to Download/AirGrab/${result.folderName}"
-            is PayloadSaver.SaveResult.TextCopied ->
-                if (result.isUrl) result.text else "Copied to Clipboard: ${result.text.take(80)}"
-        }
-
-        Text(
-            text = detailText,
-            style = MaterialTheme.typography.bodySmall,
-            color = palette.textSecondary,
-            textAlign = TextAlign.Center,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis
-        )
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            val primaryActionLabel = when (result) {
-                is PayloadSaver.SaveResult.MediaSaved -> "Open"
-                is PayloadSaver.SaveResult.FileSaved -> "Open"
-                is PayloadSaver.SaveResult.FolderExtracted -> "Downloads"
-                is PayloadSaver.SaveResult.TextCopied -> if (result.isUrl) "Open Link" else null
+            if (result is PayloadSaver.SaveResult.MediaSaved) {
+                val resolvedMime = remember(result.uri) {
+                    context.contentResolver.getType(result.uri)
+                }
+                MediaPreviewBox(
+                    uri = result.uri,
+                    mimeType = resolvedMime,
+                    contentDescription = result.displayName,
+                    palette = palette,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(180.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(palette.surfaceSubtle)
+                )
+                Spacer(modifier = Modifier.height(18.dp))
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(56.dp)
+                        .clip(CircleShape)
+                        .background(palette.accentReceive.copy(alpha = 0.14f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = null,
+                        tint = palette.accentReceive,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.height(18.dp))
             }
 
-            if (primaryActionLabel != null) {
-                Button(
-                    onClick = { launchDeliveredResult(context, result) },
+            Text(
+                text = "Delivered",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = palette.textPrimary
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            val detailText = when (result) {
+                is PayloadSaver.SaveResult.MediaSaved -> "Saved to Pictures/AirGrab • ${result.displayName}"
+                is PayloadSaver.SaveResult.FileSaved -> "Saved to Download/AirGrab • ${result.displayName}"
+                is PayloadSaver.SaveResult.FolderExtracted ->
+                    "Extracted ${result.extractedCount} files to Download/AirGrab/${result.folderName}"
+                is PayloadSaver.SaveResult.TextCopied ->
+                    if (result.isUrl) result.text else "Copied to Clipboard: ${result.text.take(80)}"
+            }
+
+            Text(
+                text = detailText,
+                style = MaterialTheme.typography.bodySmall,
+                color = palette.textSecondary,
+                textAlign = TextAlign.Center,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            Spacer(modifier = Modifier.height(22.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                val primaryActionLabel = when (result) {
+                    is PayloadSaver.SaveResult.MediaSaved -> "Open"
+                    is PayloadSaver.SaveResult.FileSaved -> "Open"
+                    is PayloadSaver.SaveResult.FolderExtracted -> "Downloads"
+                    is PayloadSaver.SaveResult.TextCopied -> if (result.isUrl) "Open Link" else null
+                }
+
+                if (primaryActionLabel != null) {
+                    Button(
+                        onClick = { launchDeliveredResult(context, result) },
+                        shape = RoundedCornerShape(24.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = palette.accentReceive,
+                            contentColor = palette.onAccent
+                        )
+                    ) {
+                        Text(primaryActionLabel, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = onDone,
                     shape = RoundedCornerShape(24.dp),
                     modifier = Modifier
                         .weight(1f)
                         .heightIn(min = 48.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = palette.accentReceive,
-                        contentColor = palette.onAccent
-                    )
+                    border = BorderStroke(1.dp, palette.borderHairline)
                 ) {
-                    Text(primaryActionLabel, fontWeight = FontWeight.SemiBold)
+                    Text("Done", color = palette.textPrimary)
                 }
-            }
-
-            OutlinedButton(
-                onClick = onDone,
-                shape = RoundedCornerShape(24.dp),
-                modifier = Modifier
-                    .weight(1f)
-                    .heightIn(min = 48.dp),
-                border = BorderStroke(1.dp, palette.borderHairline)
-            ) {
-                Text("Done", color = palette.textPrimary)
             }
         }
     }

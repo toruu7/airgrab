@@ -93,14 +93,15 @@ class PayloadResolver(private val context: Context) {
         }
 
         val id = UUID.randomUUID().toString()
+        val mediaMime = MediaPreviewLoader.inferMediaMime(displayName, detectedMime)
 
-        if (detectedMime.startsWith("image/") || detectedMime.startsWith("video/")) {
+        if (mediaMime != null) {
             TransferPayload.MediaItem(
                 id = id,
                 displayName = displayName,
                 totalBytes = sizeBytes,
                 uri = uri,
-                mimeType = detectedMime
+                mimeType = mediaMime
             )
         } else {
             TransferPayload.BinaryFile(

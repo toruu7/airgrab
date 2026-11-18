@@ -389,20 +389,20 @@ fun WakeScreenContent(
         }
     }
 
+    val wakeIntensity = when {
+        gestureConfidence > 0.15f -> gestureConfidence
+        isReceiving -> 0.55f
+        else -> 0.28f
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(palette.canvas)
             .spatialAura(
                 color = palette.accentReceiveAura,
-                maxAlpha = if (palette.isDark) 0.42f else 0.30f,
-                intensity = {
-                    when {
-                        gestureConfidence > 0.15f -> gestureConfidence
-                        isReceiving -> 0.55f
-                        else -> 0.28f
-                    }
-                }
+                intensity = wakeIntensity,
+                maxAlpha = if (palette.isDark) 0.28f else 0.20f
             )
     ) {
         Column(
@@ -469,18 +469,26 @@ fun WakeScreenContent(
                 isReceiving -> "wake_receiving"
                 else -> "wake_armed"
             }
+            val wakePhase = when {
+                deliveredResult != null -> SpatialCardPhase.DELIVERED
+                isReceiving -> SpatialCardPhase.RELEASING
+                else -> SpatialCardPhase.GRABBED
+            }
 
-            Box(
+            SpatialGlowField(
+                phase = wakePhase,
+                triggerKey = wakeTriggerKey,
+                isOutwardRelease = isReceiving || deliveredResult != null,
+                glowColor = palette.accentReceiveAura,
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .verticalScroll(rememberScrollState()),
-                contentAlignment = Alignment.Center
             ) {
-                SpatialGlowField(
-                    triggerKey = wakeTriggerKey,
-                    isOutwardRelease = isReceiving || deliveredResult != null,
-                    glowColor = palette.accentReceiveAura
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState()),
+                    contentAlignment = Alignment.Center
                 ) {
                     if (deliveredResult != null) {
                         DeliveredCard(
@@ -531,7 +539,7 @@ fun WakeScreenContent(
                                         phase = if (isReceiving) SpatialCardPhase.RELEASING else SpatialCardPhase.GRABBED,
                                         glowColor = palette.accentReceive
                                     )
-                                    .background(palette.surfaceGlass, RoundedCornerShape(28.dp))
+                                    .background(palette.surfaceCard, RoundedCornerShape(28.dp))
                                     .semantics { liveRegion = LiveRegionMode.Polite }
                             ) {
                             Column(
