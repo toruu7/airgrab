@@ -50,6 +50,9 @@ import dev.toruu.airgrab.data.vision.HandGesture
 import dev.toruu.airgrab.data.vision.MediaPipeGestureDetector
 import dev.toruu.airgrab.domain.GestureEvent
 import dev.toruu.airgrab.domain.GestureHysteresis
+import dev.toruu.airgrab.ui.components.SpatialCardPhase
+import dev.toruu.airgrab.ui.components.SpatialGlowField
+import dev.toruu.airgrab.ui.components.spatial3DGlowCard
 import dev.toruu.airgrab.ui.components.spatialAura
 import dev.toruu.airgrab.ui.screens.DeliveredCard
 import dev.toruu.airgrab.ui.theme.AirGrabMotion
@@ -461,6 +464,12 @@ fun WakeScreenContent(
             }
 
             // Adaptive Scrollable Center Stage
+            val wakeTriggerKey: Any = when {
+                deliveredResult != null -> "wake_delivered"
+                isReceiving -> "wake_receiving"
+                else -> "wake_armed"
+            }
+
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -468,56 +477,63 @@ fun WakeScreenContent(
                     .verticalScroll(rememberScrollState()),
                 contentAlignment = Alignment.Center
             ) {
-                if (deliveredResult != null) {
-                    DeliveredCard(
-                        result = deliveredResult,
-                        palette = palette,
-                        onDone = onDismiss
-                    )
-                } else {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier
-                            .widthIn(max = 440.dp)
-                            .fillMaxWidth()
-                    ) {
-                        val arcProgress = (remainingMs.toFloat() / totalWindowMs.toFloat()).coerceIn(0f, 1f)
-                        val animatedArc by animateFloatAsState(
-                            targetValue = arcProgress,
-                            animationSpec = if (palette.reduceMotion) snap() else AirGrabMotion.LayoutSettle,
-                            label = "WakeArc"
+                SpatialGlowField(
+                    triggerKey = wakeTriggerKey,
+                    isOutwardRelease = isReceiving || deliveredResult != null,
+                    glowColor = palette.accentReceiveAura
+                ) {
+                    if (deliveredResult != null) {
+                        DeliveredCard(
+                            result = deliveredResult,
+                            palette = palette,
+                            onDone = onDismiss
                         )
-
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier.size(120.dp)
-                        ) {
-                            CircularProgressIndicator(
-                                progress = { if (isReceiving) (progress ?: 0f) else animatedArc },
-                                modifier = Modifier.fillMaxSize(),
-                                strokeWidth = 4.dp,
-                                color = palette.accentReceive,
-                                trackColor = palette.surfaceSubtle
-                            )
-
-                            Icon(
-                                imageVector = Icons.Default.PanTool,
-                                contentDescription = null,
-                                modifier = Modifier.size(44.dp),
-                                tint = palette.accentReceive
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(24.dp))
-
-                        Surface(
-                            shape = RoundedCornerShape(28.dp),
-                            color = palette.surfaceGlass,
-                            border = BorderStroke(1.5.dp, palette.accentReceive),
+                    } else {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier
+                                .widthIn(max = 440.dp)
                                 .fillMaxWidth()
-                                .semantics { liveRegion = LiveRegionMode.Polite }
                         ) {
+                            val arcProgress = (remainingMs.toFloat() / totalWindowMs.toFloat()).coerceIn(0f, 1f)
+                            val animatedArc by animateFloatAsState(
+                                targetValue = arcProgress,
+                                animationSpec = if (palette.reduceMotion) snap() else AirGrabMotion.LayoutSettle,
+                                label = "WakeArc"
+                            )
+
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier.size(120.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    progress = { if (isReceiving) (progress ?: 0f) else animatedArc },
+                                    modifier = Modifier.fillMaxSize(),
+                                    strokeWidth = 4.dp,
+                                    color = palette.accentReceive,
+                                    trackColor = palette.surfaceSubtle
+                                )
+
+                                Icon(
+                                    imageVector = Icons.Default.PanTool,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(44.dp),
+                                    tint = palette.accentReceive
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(24.dp))
+
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .spatial3DGlowCard(
+                                        phase = if (isReceiving) SpatialCardPhase.RELEASING else SpatialCardPhase.GRABBED,
+                                        glowColor = palette.accentReceive
+                                    )
+                                    .background(palette.surfaceGlass, RoundedCornerShape(28.dp))
+                                    .semantics { liveRegion = LiveRegionMode.Polite }
+                            ) {
                             Column(
                                 modifier = Modifier.padding(24.dp),
                                 horizontalAlignment = Alignment.CenterHorizontally
@@ -586,4 +602,5 @@ fun WakeScreenContent(
             }
         }
     }
+}
 }

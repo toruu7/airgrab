@@ -33,7 +33,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -60,6 +59,9 @@ import dev.toruu.airgrab.service.AirGrabDiscoveryService
 import dev.toruu.airgrab.ui.AirGrabViewModel
 import dev.toruu.airgrab.ui.AppMode
 import dev.toruu.airgrab.ui.components.PermissionHelper
+import dev.toruu.airgrab.ui.components.SpatialCardPhase
+import dev.toruu.airgrab.ui.components.SpatialGlowField
+import dev.toruu.airgrab.ui.components.spatial3DGlowCard
 import dev.toruu.airgrab.ui.components.spatialAura
 import dev.toruu.airgrab.ui.theme.AirGrabMotion
 import dev.toruu.airgrab.ui.theme.AirGrabPalette
@@ -304,6 +306,17 @@ fun AirGrabSurface(
             }
 
             // --- Center Adaptive Scrollable Stage ---
+            val effectTriggerKey: Any? = when {
+                isReceiving -> "rec_rel_${(receiverState as ReceiverState.Receiving).sessionId}"
+                delivered != null -> "rec_del_${delivered.sessionId}"
+                isTransferring -> "send_rel_${(senderState as SenderState.Transferring).sessionId}"
+                sent != null -> "send_done_${sent.sessionId}"
+                isGrabbed -> "send_grab_${(senderState as SenderState.Grabbed).sessionId}"
+                isArmed -> "rec_arm_${(receiverState as ReceiverState.Armed).grabReady.sessionId}"
+                else -> null
+            }
+            val isOutwardEffect = isReceiving || delivered != null || isTransferring || sent != null
+
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -312,76 +325,82 @@ fun AirGrabSurface(
                     .padding(vertical = 20.dp),
                 contentAlignment = Alignment.Center
             ) {
-                when {
-                    isStaging -> {
-                        StagingLoadingCard(palette = palette)
-                    }
+                SpatialGlowField(
+                    triggerKey = effectTriggerKey,
+                    isOutwardRelease = isOutwardEffect,
+                    glowColor = auraColor
+                ) {
+                    when {
+                        isStaging -> {
+                            StagingLoadingCard(palette = palette)
+                        }
 
-                    isReceiving -> {
-                        val incomingState = receiverState as ReceiverState.Receiving
-                        TransferProgressCard(
-                            title = "Receiving",
-                            fileName = incomingState.grabReady.fileName,
-                            progress = transferProgress ?: incomingState.progress,
-                            accentColor = palette.accentReceive,
-                            palette = palette,
-                            onCancel = { viewModel.resetReceiverForNextDrop() }
-                        )
-                    }
+                        isReceiving -> {
+                            val incomingState = receiverState as ReceiverState.Receiving
+                            TransferProgressCard(
+                                title = "Receiving",
+                                fileName = incomingState.grabReady.fileName,
+                                progress = transferProgress ?: incomingState.progress,
+                                accentColor = palette.accentReceive,
+                                palette = palette,
+                                onCancel = { viewModel.resetReceiverForNextDrop() }
+                            )
+                        }
 
-                    delivered != null -> {
-                        DeliveredCard(
-                            result = delivered.result,
-                            palette = palette,
-                            onDone = { viewModel.resetReceiverForNextDrop() }
-                        )
-                    }
+                        delivered != null -> {
+                            DeliveredCard(
+                                result = delivered.result,
+                                palette = palette,
+                                onDone = { viewModel.resetReceiverForNextDrop() }
+                            )
+                        }
 
-                    isArmed -> {
-                        val armedState = receiverState as ReceiverState.Armed
-                        ArmedCatchCard(
-                            fileName = armedState.grabReady.fileName,
-                            senderName = armedState.grabReady.senderName,
-                            sizeBytes = armedState.grabReady.sizeBytes,
-                            textPreview = armedState.grabReady.textPreview,
-                            palette = palette
-                        )
-                    }
+                        isArmed -> {
+                            val armedState = receiverState as ReceiverState.Armed
+                            ArmedCatchCard(
+                                fileName = armedState.grabReady.fileName,
+                                senderName = armedState.grabReady.senderName,
+                                sizeBytes = armedState.grabReady.sizeBytes,
+                                textPreview = armedState.grabReady.textPreview,
+                                palette = palette
+                            )
+                        }
 
-                    isTransferring -> {
-                        val transferringState = senderState as SenderState.Transferring
-                        TransferProgressCard(
-                            title = "Sending",
-                            fileName = transferringState.payload.displayName,
-                            progress = transferProgress ?: transferringState.progress,
-                            accentColor = palette.accentSend,
-                            palette = palette,
-                            onCancel = { viewModel.cancelTransfer() }
-                        )
-                    }
+                        isTransferring -> {
+                            val transferringState = senderState as SenderState.Transferring
+                            TransferProgressCard(
+                                title = "Sending",
+                                fileName = transferringState.payload.displayName,
+                                progress = transferProgress ?: transferringState.progress,
+                                accentColor = palette.accentSend,
+                                palette = palette,
+                                onCancel = { viewModel.cancelTransfer() }
+                            )
+                        }
 
-                    sent != null -> {
-                        SentConfirmationCard(
-                            displayName = sent.displayName,
-                            palette = palette,
-                            onDone = { viewModel.resetSenderForNextSend() }
-                        )
-                    }
+                        sent != null -> {
+                            SentConfirmationCard(
+                                displayName = sent.displayName,
+                                palette = palette,
+                                onDone = { viewModel.resetSenderForNextSend() }
+                            )
+                        }
 
-                    senderState is SenderState.Staged || isGrabbed -> {
-                        val payload = (senderState as? SenderState.Staged)?.payload
-                            ?: (senderState as? SenderState.Grabbed)?.payload
+                        senderState is SenderState.Staged || isGrabbed -> {
+                            val payload = (senderState as? SenderState.Staged)?.payload
+                                ?: (senderState as? SenderState.Grabbed)?.payload
 
-                        StagedPayloadCard(
-                            payload = payload,
-                            isGrabbed = isGrabbed,
-                            hasConnectedPeers = connectedPeers.isNotEmpty(),
-                            palette = palette
-                        )
-                    }
+                            StagedPayloadCard(
+                                payload = payload,
+                                isGrabbed = isGrabbed,
+                                hasConnectedPeers = connectedPeers.isNotEmpty(),
+                                palette = palette
+                            )
+                        }
 
-                    else -> {
-                        IdleAmbientCanvas(palette = palette)
+                        else -> {
+                            IdleAmbientCanvas(palette = palette)
+                        }
                     }
                 }
             }
@@ -737,43 +756,25 @@ private fun StagedPayloadCard(
     hasConnectedPeers: Boolean,
     palette: AirGrabPalette
 ) {
-    val animatedScale by animateFloatAsState(
-        targetValue = if (isGrabbed) 0.85f else 1.0f,
-        animationSpec = when {
-            palette.reduceMotion -> snap()
-            isGrabbed -> AirGrabMotion.GrabCompression
-            else -> AirGrabMotion.GestureInterruption
-        },
-        label = "GrabCompression"
-    )
-
-    val animatedAlpha by animateFloatAsState(
-        targetValue = if (isGrabbed) 0.94f else 1.0f,
-        animationSpec = if (palette.reduceMotion) snap() else AirGrabMotion.LayoutSettle,
-        label = "GrabAlpha"
-    )
-
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
             .widthIn(max = 440.dp)
             .fillMaxWidth()
-            .graphicsLayer {
-                scaleX = animatedScale
-                scaleY = animatedScale
-                alpha = animatedAlpha
-            }
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 190.dp, max = 280.dp)
+                .spatial3DGlowCard(
+                    phase = if (isGrabbed) SpatialCardPhase.GRABBED else SpatialCardPhase.RESTING,
+                    glowColor = palette.accentSend
+                )
                 .clip(RoundedCornerShape(28.dp))
                 .background(palette.surfaceGlass)
-                .border(
-                    width = if (isGrabbed) 2.dp else 1.dp,
-                    color = if (isGrabbed) palette.accentSend else palette.borderHairline,
-                    shape = RoundedCornerShape(28.dp)
+                .then(
+                    if (!isGrabbed) Modifier.border(1.dp, palette.borderHairline, RoundedCornerShape(28.dp))
+                    else Modifier
                 ),
             contentAlignment = Alignment.Center
         ) {
@@ -886,9 +887,11 @@ private fun ArmedCatchCard(
         modifier = Modifier
             .widthIn(max = 440.dp)
             .fillMaxWidth()
-            .clip(RoundedCornerShape(28.dp))
-            .background(palette.surfaceGlass)
-            .border(1.5.dp, palette.accentReceive, RoundedCornerShape(28.dp))
+            .spatial3DGlowCard(
+                phase = SpatialCardPhase.GRABBED,
+                glowColor = palette.accentReceive
+            )
+            .background(palette.surfaceGlass, RoundedCornerShape(28.dp))
             .padding(28.dp)
             .semantics { liveRegion = LiveRegionMode.Polite }
     ) {
@@ -981,9 +984,11 @@ private fun TransferProgressCard(
         modifier = Modifier
             .widthIn(max = 440.dp)
             .fillMaxWidth()
-            .clip(RoundedCornerShape(28.dp))
-            .background(palette.surfaceGlass)
-            .border(1.dp, palette.borderHairline, RoundedCornerShape(28.dp))
+            .spatial3DGlowCard(
+                phase = SpatialCardPhase.RELEASING,
+                glowColor = accentColor
+            )
+            .background(palette.surfaceGlass, RoundedCornerShape(28.dp))
             .padding(28.dp)
             .semantics { liveRegion = LiveRegionMode.Polite }
     ) {
@@ -1052,8 +1057,11 @@ private fun SentConfirmationCard(
         modifier = Modifier
             .widthIn(max = 440.dp)
             .fillMaxWidth()
-            .clip(RoundedCornerShape(28.dp))
-            .background(palette.surfaceGlass)
+            .spatial3DGlowCard(
+                phase = SpatialCardPhase.DELIVERED,
+                glowColor = palette.accentSend
+            )
+            .background(palette.surfaceGlass, RoundedCornerShape(28.dp))
             .border(1.5.dp, palette.accentSend, RoundedCornerShape(28.dp))
             .padding(28.dp)
             .semantics { liveRegion = LiveRegionMode.Polite }
@@ -1125,8 +1133,11 @@ fun DeliveredCard(
         modifier = modifier
             .widthIn(max = 440.dp)
             .fillMaxWidth()
-            .clip(RoundedCornerShape(28.dp))
-            .background(palette.surfaceGlass)
+            .spatial3DGlowCard(
+                phase = SpatialCardPhase.DELIVERED,
+                glowColor = palette.accentReceive
+            )
+            .background(palette.surfaceGlass, RoundedCornerShape(28.dp))
             .border(1.5.dp, palette.accentReceive, RoundedCornerShape(28.dp))
             .padding(28.dp)
             .semantics { liveRegion = LiveRegionMode.Polite }
